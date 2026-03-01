@@ -116,7 +116,7 @@ fn unicode_display_width(s: &str) -> usize {
 }
 
 enum Mode {
-    Timer(u64),
+    Timer { secs: u64, label: String },
     Stopwatch,
 }
 
@@ -134,20 +134,48 @@ fn notify(msg: &str) {
         .output();
 }
 
+fn parse_target_time(input: &str) -> Option<u64> {
+    let parts: Vec<&str> = input.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let hour: u32 = parts[0].parse().ok()?;
+    let min: u32 = parts[1].parse().ok()?;
+    if hour >= 24 || min >= 60 {
+        return None;
+    }
+    let now = Local::now();
+    let today = now.date_naive();
+    let target_naive = today.and_hms_opt(hour, min, 0)?;
+    let target = target_naive.and_local_timezone(now.timezone()).single()?;
+    let target = if target <= now {
+        // Target time already passed today, schedule for tomorrow
+        target + chrono::Duration::days(1)
+    } else {
+        target
+    };
+    let diff = (target - now).num_seconds();
+    if diff <= 0 { None } else { Some(diff as u64) }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mode = if args.len() == 1 {
         Mode::Stopwatch
     } else if args.len() == 2 {
-        match parse_duration(&args[1]) {
-            Some(s) => Mode::Timer(s),
-            None => {
-                eprintln!("Durée invalide : {}", args[1]);
-                std::process::exit(1);
-            }
+        if let Some(secs) = parse_target_time(&args[1]) {
+            let label = format!("→ {}", args[1]);
+            Mode::Timer { secs, label }
+        } else if let Some(secs) = parse_duration(&args[1]) {
+            let label = format!("({})", format_duration_human(secs));
+            Mode::Timer { secs, label }
+        } else {
+            eprintln!("Durée invalide : {}", args[1]);
+            eprintln!("Usage: pomo [durée|heure]  (ex: pomo, pomo 25m, pomo 14:30)");
+            std::process::exit(1);
         }
     } else {
-        eprintln!("Usage: pomo [durée]  (ex: pomo, pomo 25m, pomo 90s)");
+        eprintln!("Usage: pomo [durée|heure]  (ex: pomo, pomo 25m, pomo 14:30)");
         std::process::exit(1);
     };
 
@@ -157,21 +185,19 @@ fn main() {
     let _guard = RawModeGuard;
 
     let start = Instant::now();
-    let started_at = match mode {
-        Mode::Timer(total) => {
-            let label = format_duration_human(total);
-            Local::now().format("Started at %H:%M").to_string() + &format!(" ({label})")
+    let start_time = Local::now();
+    let (total_secs, started_at) = match &mode {
+        Mode::Timer { secs, label } => {
+            (*secs, format!("Started at {} {label}", start_time.format("%H:%M")))
         }
-        Mode::Stopwatch => Local::now().format("Started at %H:%M").to_string(),
+        Mode::Stopwatch => (0, start_time.format("Started at %H:%M").to_string()),
     };
 
     loop {
         let elapsed_secs = start.elapsed().as_secs();
         let display_secs = match mode {
             Mode::Stopwatch => elapsed_secs,
-            Mode::Timer(total) => {
-                total.saturating_sub(elapsed_secs)
-            }
+            Mode::Timer { .. } => total_secs.saturating_sub(elapsed_secs),
         };
 
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
@@ -195,7 +221,7 @@ fn main() {
         )
         .ok();
 
-        if matches!(mode, Mode::Timer(_)) && display_secs == 0 {
+        if matches!(mode, Mode::Timer { .. }) && display_secs == 0 {
             break;
         }
 
@@ -209,12 +235,18 @@ fn main() {
         }
     }
 
-    if matches!(mode, Mode::Timer(_)) {
+    if matches!(mode, Mode::Timer { .. }) {
         notify("Temps écoulé !");
     }
 
     drop(_guard);
-    println!("\n\n");
+    let end_time = Local::now();
+    let elapsed = format_duration_human(start.elapsed().as_secs());
+    println!();
+    println!("  Started:  {}", start_time.format("%Y-%m-%d %H:%M:%S"));
+    println!("  Duration: {}", elapsed);
+    println!("  Ended:    {}", end_time.format("%Y-%m-%d %H:%M:%S"));
+    println!();
 }
 
 struct RawModeGuard;
