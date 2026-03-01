@@ -12,7 +12,8 @@ CLI pomodoro/timer/stopwatch for the terminal (macOS) written in Rust. Displays 
 cargo build              # dev build
 cargo build --release    # release build
 cargo run                # stopwatch mode (counts up)
-cargo run -- 25m         # timer mode (countdown)
+cargo run -- 25m         # timer mode (countdown from duration)
+cargo run -- 14:30       # timer mode (countdown to target time)
 cargo test               # run tests
 cargo clippy             # lint
 ```
@@ -21,15 +22,18 @@ cargo clippy             # lint
 
 - **No argument** (`pomo`): stopwatch, counts up from 00:00, no notification
 - **With duration** (`pomo 25m`): countdown timer, notification + sound at the end
+- **With target time** (`pomo 14:30`): countdown to a specific time (HH:MM), notification + sound at the end. If the time has already passed today, targets tomorrow.
 
-## Duration Format
+## Input Formats
 
-Accepts `25m`, `90s`, `1h30m`. Units: `h` (hours), `m` (minutes), `s` (seconds).
+- **Duration**: `25m`, `90s`, `1h30m`, `2j` (days). Units: `j` (days), `h` (hours), `m` (minutes), `s` (seconds).
+- **Target time**: `HH:MM` (24h format, e.g. `14:30`, `9:00`).
 
 ## Architecture
 
 Single `src/main.rs`. Key components:
-- `parse_duration` — parses duration strings
+- `parse_duration` — parses duration strings (`25m`, `1h30m`)
+- `parse_target_time` — parses target time (`HH:MM`) and computes remaining seconds
 - `render_big` — ASCII digit rendering (7-line high glyphs), centered horizontally
 - Main loop uses `Instant`-based timing (no drift), polls crossterm events at 100ms
 - Alternate screen + raw mode with `RawModeGuard` (Drop-based cleanup)
