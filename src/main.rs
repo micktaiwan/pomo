@@ -121,6 +121,14 @@ enum Mode {
 }
 
 fn notify(msg: &str) {
+    // terminal-notifier doesn't open Script Editor on click (unlike osascript)
+    let tn = Command::new("terminal-notifier")
+        .args(["-title", "pomo", "-message", msg, "-sound", "Glass"])
+        .output();
+    if tn.is_ok() {
+        return;
+    }
+    // Fallback: osascript (clicking the notification will open Script Editor)
     let _ = Command::new("osascript")
         .args(["-e", &format!("display notification \"{msg}\" with title \"pomo\" sound name \"Glass\"")])
         .output();
