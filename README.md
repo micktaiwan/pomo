@@ -1,18 +1,31 @@
 # pomo
 
-CLI timer / pomodoro / chronomètre pour le terminal, avec countdown ASCII et notifications macOS.
+CLI timer / pomodoro / stopwatch for the terminal, with large ASCII digits and macOS notifications.
 
 ## Usage
 
 ```bash
-pomo            # chronomètre (compte vers le haut)
-pomo 25m        # pomodoro classique 25 min
-pomo 5m         # pause 5 min
-pomo 90s        # 90 secondes
-pomo 1h30m      # 1 heure 30
+pomo            # stopwatch (counts up)
+pomo 25m        # classic 25 min pomodoro
+pomo 5m         # 5 min break
+pomo 90s        # 90 seconds
+pomo 1h30m      # 1 hour 30
+pomo 2j         # 2 days
 ```
 
-Quitter : `Ctrl+C`, `q` ou `Esc`.
+Quit: `Ctrl+C`, `q` or `Esc`.
+
+## Notifications
+
+When a timer ends, a macOS notification with sound is sent.
+
+For best results, install [terminal-notifier](https://github.com/julienXX/terminal-notifier):
+
+```bash
+brew install terminal-notifier
+```
+
+Without it, pomo falls back to `osascript` (clicking the notification will open Script Editor).
 
 ## Build
 
