@@ -4,7 +4,7 @@ use crossterm::{
     style::Print,
     terminal::{self, ClearType},
 };
-use std::{env, io::stdout, process::Command, time::{Duration, Instant}};
+use std::{env, io::stdout, process::Command, time::{Duration, SystemTime}};
 use chrono::Local;
 
 const DIGITS: [&[&str]; 10] = [
@@ -160,22 +160,46 @@ fn parse_target_time(input: &str) -> Option<u64> {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let mode = if args.len() == 1 {
+
+    // Parse --title option: consumes all words until a valid duration/time is found
+    let mut title: Option<String> = None;
+    let mut remaining_args: Vec<String> = Vec::new();
+    let mut args_iter = args.iter().skip(1).peekable();
+    while let Some(arg) = args_iter.next() {
+        if arg == "--title" {
+            let mut title_words: Vec<String> = Vec::new();
+            while let Some(next) = args_iter.peek() {
+                if parse_duration(next).is_some() || parse_target_time(next).is_some() {
+                    break;
+                }
+                title_words.push(args_iter.next().unwrap().clone());
+            }
+            if title_words.is_empty() {
+                eprintln!("--title nécessite une valeur");
+                std::process::exit(1);
+            }
+            title = Some(title_words.join(" "));
+        } else {
+            remaining_args.push(arg.clone());
+        }
+    }
+
+    let mode = if remaining_args.is_empty() {
         Mode::Stopwatch
-    } else if args.len() == 2 {
-        if let Some(secs) = parse_target_time(&args[1]) {
-            let label = format!("→ {}", args[1]);
+    } else if remaining_args.len() == 1 {
+        if let Some(secs) = parse_target_time(&remaining_args[0]) {
+            let label = format!("→ {}", remaining_args[0]);
             Mode::Timer { secs, label }
-        } else if let Some(secs) = parse_duration(&args[1]) {
+        } else if let Some(secs) = parse_duration(&remaining_args[0]) {
             let label = format!("({})", format_duration_human(secs));
             Mode::Timer { secs, label }
         } else {
-            eprintln!("Durée invalide : {}", args[1]);
-            eprintln!("Usage: pomo [durée|heure]  (ex: pomo, pomo 25m, pomo 14:30)");
+            eprintln!("Durée invalide : {}", remaining_args[0]);
+            eprintln!("Usage: pomo [--title TEXT] [durée|heure]  (ex: pomo, pomo 25m, pomo --title Focus 25m)");
             std::process::exit(1);
         }
     } else {
-        eprintln!("Usage: pomo [durée|heure]  (ex: pomo, pomo 25m, pomo 14:30)");
+        eprintln!("Usage: pomo [--title TEXT] [durée|heure]  (ex: pomo, pomo 25m, pomo --title Focus 25m)");
         std::process::exit(1);
     };
 
@@ -184,7 +208,7 @@ fn main() {
     execute!(stdout, terminal::EnterAlternateScreen).ok();
     let _guard = RawModeGuard;
 
-    let start = Instant::now();
+    let start = SystemTime::now();
     let start_time = Local::now();
     let (total_secs, started_at) = match &mode {
         Mode::Timer { secs, label } => {
@@ -194,7 +218,7 @@ fn main() {
     };
 
     loop {
-        let elapsed_secs = start.elapsed().as_secs();
+        let elapsed_secs = start.elapsed().unwrap_or_default().as_secs();
         let display_secs = match mode {
             Mode::Stopwatch => elapsed_secs,
             Mode::Timer { .. } => total_secs.saturating_sub(elapsed_secs),
@@ -203,8 +227,21 @@ fn main() {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let time_str = format_time(display_secs);
         let big = render_big(&time_str, cols);
-        let total_lines = 9; // 1 label + 1 blank + 7 digits
+        let title_lines: u16 = if title.is_some() { 2 } else { 0 }; // title + blank line
+        let total_lines = title_lines + 9; // (title?) + 7 digits + blank + label
         let top = if rows > total_lines { (rows - total_lines) / 2 } else { 0 };
+
+        let title_display = if let Some(ref t) = title {
+            let pad = if (cols as usize) > t.len() {
+                " ".repeat((cols as usize - t.len()) / 2)
+            } else {
+                String::new()
+            };
+            format!("{pad}{t}\r\n\r\n")
+        } else {
+            String::new()
+        };
+
         let label_pad = if (cols as usize) > started_at.len() {
             " ".repeat((cols as usize - started_at.len()) / 2)
         } else {
@@ -215,6 +252,7 @@ fn main() {
             stdout,
             terminal::Clear(ClearType::All),
             cursor::MoveTo(0, top),
+            Print(&title_display),
             Print(&big),
             Print(format!("\r\n\r\n{label_pad}{started_at}")),
             cursor::Hide,
@@ -241,7 +279,7 @@ fn main() {
 
     drop(_guard);
     let end_time = Local::now();
-    let elapsed = format_duration_human(start.elapsed().as_secs());
+    let elapsed = format_duration_human(start.elapsed().unwrap_or_default().as_secs());
     println!();
     println!("  Started:  {}", start_time.format("%Y-%m-%d %H:%M:%S"));
     println!("  Duration: {}", elapsed);
@@ -271,6 +309,22 @@ mod tests {
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration("0m"), None);
         assert_eq!(parse_duration("25"), None);
+    }
+
+    #[test]
+    fn test_parse_target_time() {
+        // Valid times return Some (exact value depends on current time, just check Some/None)
+        assert!(parse_target_time("23:59").is_some());
+        assert!(parse_target_time("00:00").is_some());
+        assert!(parse_target_time("9:05").is_some());
+
+        // Invalid formats
+        assert_eq!(parse_target_time("25:00"), None);
+        assert_eq!(parse_target_time("12:60"), None);
+        assert_eq!(parse_target_time("abc"), None);
+        assert_eq!(parse_target_time("12"), None);
+        assert_eq!(parse_target_time("12:00:00"), None);
+        assert_eq!(parse_target_time(""), None);
     }
 
     #[test]
