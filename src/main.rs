@@ -24,6 +24,22 @@ const COLON: [&str; 7] = ["    ", " ██ ", " ██ ", "    ", " ██ ", " 
 const GLYPH_J: [&str; 7] = ["  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "███   "];
 const GLYPH_SPACE: [&str; 7] = ["    ", "    ", "    ", "    ", "    ", "    ", "    "];
 
+const DIGITS_SM: [&[&str]; 10] = [
+    &["███", "█ █", "█ █", "█ █", "███"],
+    &[" █ ", "██ ", " █ ", " █ ", "███"],
+    &["███", "  █", "███", "█  ", "███"],
+    &["███", "  █", "███", "  █", "███"],
+    &["█ █", "█ █", "███", "  █", "  █"],
+    &["███", "█  ", "███", "  █", "███"],
+    &["███", "█  ", "███", "█ █", "███"],
+    &["███", "  █", " █ ", "█  ", "█  "],
+    &["███", "█ █", "███", "█ █", "███"],
+    &["███", "█ █", "███", "  █", "███"],
+];
+const COLON_SM: [&str; 5] = ["   ", " █ ", "   ", " █ ", "   "];
+const GLYPH_J_SM: [&str; 5] = [" █ ", " █ ", " █ ", " █ ", "█  "];
+const GLYPH_SPACE_SM: [&str; 5] = ["   ", "   ", "   ", "   ", "   "];
+
 fn parse_duration(input: &str) -> Option<u64> {
     let input = input.trim().to_lowercase();
     let mut total: u64 = 0;
@@ -86,15 +102,35 @@ fn format_time(secs: u64) -> String {
     }
 }
 
-fn render_big(time_str: &str, term_width: u16) -> String {
-    let mut lines = vec![String::new(); 7];
+fn render_big(time_str: &str, term_width: u16, size: u8) -> String {
+    if size == 1 {
+        let pad = if (term_width as usize) > time_str.len() {
+            " ".repeat((term_width as usize - time_str.len()) / 2)
+        } else {
+            String::new()
+        };
+        return format!("{pad}{time_str}");
+    }
+
+    let height: usize = if size == 2 { 5 } else { 7 };
+    let mut lines = vec![String::new(); height];
     for ch in time_str.chars() {
-        let glyph: &[&str] = match ch {
-            '0'..='9' => DIGITS[ch as usize - '0' as usize],
-            ':' => &COLON,
-            'j' => &GLYPH_J,
-            ' ' => &GLYPH_SPACE,
-            _ => continue,
+        let glyph: &[&str] = if size == 2 {
+            match ch {
+                '0'..='9' => DIGITS_SM[ch as usize - '0' as usize],
+                ':' => &COLON_SM,
+                'j' => &GLYPH_J_SM,
+                ' ' => &GLYPH_SPACE_SM,
+                _ => continue,
+            }
+        } else {
+            match ch {
+                '0'..='9' => DIGITS[ch as usize - '0' as usize],
+                ':' => &COLON,
+                'j' => &GLYPH_J,
+                ' ' => &GLYPH_SPACE,
+                _ => continue,
+            }
         };
         for (i, row) in glyph.iter().enumerate() {
             lines[i].push_str(row);
@@ -161,12 +197,28 @@ fn parse_target_time(input: &str) -> Option<u64> {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Parse --title option: consumes all words until a valid duration/time is found
+    // Parse options
     let mut title: Option<String> = None;
+    let mut size: u8 = 2;
     let mut remaining_args: Vec<String> = Vec::new();
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
-        if arg == "--title" {
+        if arg == "-s" {
+            if let Some(val) = args_iter.next() {
+                match val.as_str() {
+                    "1" => size = 1,
+                    "2" => size = 2,
+                    "3" => size = 3,
+                    _ => {
+                        eprintln!("Option -s invalide : {} (valeurs possibles : 1, 2, 3)", val);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!("-s nécessite une valeur (1, 2, 3)");
+                std::process::exit(1);
+            }
+        } else if arg == "--title" || arg == "-t" {
             let mut title_words: Vec<String> = Vec::new();
             while let Some(next) = args_iter.peek() {
                 if parse_duration(next).is_some() || parse_target_time(next).is_some() {
@@ -188,18 +240,18 @@ fn main() {
         Mode::Stopwatch
     } else if remaining_args.len() == 1 {
         if let Some(secs) = parse_target_time(&remaining_args[0]) {
-            let label = format!("→ {}", remaining_args[0]);
+            let label = format!("→ {} ({})", remaining_args[0], format_duration_human(secs));
             Mode::Timer { secs, label }
         } else if let Some(secs) = parse_duration(&remaining_args[0]) {
             let label = format!("({})", format_duration_human(secs));
             Mode::Timer { secs, label }
         } else {
             eprintln!("Durée invalide : {}", remaining_args[0]);
-            eprintln!("Usage: pomo [--title TEXT] [durée|heure]  (ex: pomo, pomo 25m, pomo --title Focus 25m)");
+            eprintln!("Usage: pomo [-s 1|2|3] [--title TEXT] [durée|heure]  (ex: pomo, pomo -s 2 25m)");
             std::process::exit(1);
         }
     } else {
-        eprintln!("Usage: pomo [--title TEXT] [durée|heure]  (ex: pomo, pomo 25m, pomo --title Focus 25m)");
+        eprintln!("Usage: pomo [-s 1|2|3] [--title TEXT] [durée|heure]  (ex: pomo, pomo -s 2 25m)");
         std::process::exit(1);
     };
 
@@ -212,7 +264,8 @@ fn main() {
     let start_time = Local::now();
     let (total_secs, started_at) = match &mode {
         Mode::Timer { secs, label } => {
-            (*secs, format!("Started at {} {label}", start_time.format("%H:%M")))
+            let end_time = start_time + chrono::Duration::seconds(*secs as i64);
+            (*secs, format!("Started at {} — End at {} {label}", start_time.format("%H:%M"), end_time.format("%H:%M")))
         }
         Mode::Stopwatch => (0, start_time.format("Started at %H:%M").to_string()),
     };
@@ -226,9 +279,10 @@ fn main() {
 
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let time_str = format_time(display_secs);
-        let big = render_big(&time_str, cols);
-        let title_lines: u16 = if title.is_some() { 2 } else { 0 }; // title + blank line
-        let total_lines = title_lines + 9; // (title?) + 7 digits + blank + label
+        let big = render_big(&time_str, cols, size);
+        let digit_lines: u16 = match size { 1 => 1, 2 => 5, _ => 7 };
+        let title_lines: u16 = if title.is_some() { 2 } else { 0 };
+        let total_lines = title_lines + digit_lines + 2; // digits + blank + label
         let top = if rows > total_lines { (rows - total_lines) / 2 } else { 0 };
 
         let title_display = if let Some(ref t) = title {
