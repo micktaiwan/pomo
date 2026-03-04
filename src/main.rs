@@ -1,7 +1,7 @@
 use crossterm::{
     cursor, execute,
     event::{self, Event, KeyCode, KeyModifiers},
-    style::Print,
+    style::{Print, SetForegroundColor, ResetColor, Color},
     terminal::{self, ClearType},
 };
 use std::{env, io::stdout, process::Command, time::{Duration, SystemTime}};
@@ -199,7 +199,7 @@ fn main() {
 
     // Parse options
     let mut title: Option<String> = None;
-    let mut size: u8 = 2;
+    let mut size: u8 = 3;
     let mut remaining_args: Vec<String> = Vec::new();
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
@@ -262,19 +262,31 @@ fn main() {
 
     let start = SystemTime::now();
     let start_time = Local::now();
-    let (total_secs, started_at) = match &mode {
-        Mode::Timer { secs, label } => {
-            let end_time = start_time + chrono::Duration::seconds(*secs as i64);
-            (*secs, format!("Started at {} — End at {} {label}", start_time.format("%H:%M"), end_time.format("%H:%M")))
-        }
-        Mode::Stopwatch => (0, start_time.format("Started at %H:%M").to_string()),
+    let mut adjust_secs: i64 = 0; // +/- adjustment in seconds
+    let mut pause_start: Option<std::time::Instant> = None;
+    let mut total_paused = Duration::ZERO;
+    let (total_secs, timer_label) = match &mode {
+        Mode::Timer { secs, label } => (*secs, label.clone()),
+        Mode::Stopwatch => (0, String::new()),
     };
 
     loop {
-        let elapsed_secs = start.elapsed().unwrap_or_default().as_secs();
-        let display_secs = match mode {
-            Mode::Stopwatch => elapsed_secs,
-            Mode::Timer { .. } => total_secs.saturating_sub(elapsed_secs),
+        let raw_elapsed = start.elapsed().unwrap_or_default();
+        let current_paused = pause_start.map_or(total_paused, |ps| total_paused + ps.elapsed());
+        let elapsed_secs = raw_elapsed.saturating_sub(current_paused).as_secs();
+        let (display_secs, info_line) = match mode {
+            Mode::Stopwatch => (
+                (elapsed_secs as i64 + adjust_secs).max(0) as u64,
+                start_time.format("Started at %H:%M").to_string(),
+            ),
+            Mode::Timer { .. } => {
+                let remaining = (total_secs as i64 + adjust_secs) - elapsed_secs as i64;
+                let end_time = start_time + chrono::Duration::seconds((total_secs as i64 + adjust_secs).max(0)) + chrono::Duration::from_std(current_paused).unwrap_or_default();
+                (
+                    remaining.max(0) as u64,
+                    format!("Started at {} — End at {} {timer_label}", start_time.format("%H:%M"), end_time.format("%H:%M")),
+                )
+            }
         };
 
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
@@ -296,8 +308,11 @@ fn main() {
             String::new()
         };
 
-        let label_pad = if (cols as usize) > started_at.len() {
-            " ".repeat((cols as usize - started_at.len()) / 2)
+        let paused = pause_start.is_some();
+        let pause_text = if paused { " ⏸ PAUSED" } else { "" };
+        let label_full_len = info_line.len() + pause_text.len();
+        let label_pad = if (cols as usize) > label_full_len {
+            " ".repeat((cols as usize - label_full_len) / 2)
         } else {
             String::new()
         };
@@ -308,22 +323,47 @@ fn main() {
             cursor::MoveTo(0, top),
             Print(&title_display),
             Print(&big),
-            Print(format!("\r\n\r\n{label_pad}{started_at}")),
-            cursor::Hide,
+            Print(format!("\r\n\r\n{label_pad}{info_line}")),
         )
         .ok();
+        if paused {
+            execute!(
+                stdout,
+                SetForegroundColor(Color::Red),
+                Print(pause_text),
+                ResetColor,
+            )
+            .ok();
+        }
+        execute!(stdout, cursor::Hide).ok();
 
         if matches!(mode, Mode::Timer { .. }) && display_secs == 0 {
             break;
         }
 
-        if event::poll(Duration::from_millis(100)).unwrap_or(false)
-            && let Ok(Event::Key(key)) = event::read()
-            && (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.code == KeyCode::Esc
-                || key.code == KeyCode::Char('q'))
-        {
-            break;
+        if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read() {
+                match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Esc | KeyCode::Char('q') => break,
+                    KeyCode::Char(' ') | KeyCode::Char('p') => {
+                        if let Some(ps) = pause_start.take() {
+                            total_paused += ps.elapsed();
+                        } else {
+                            pause_start = Some(std::time::Instant::now());
+                        }
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') => adjust_secs += 60,
+                    KeyCode::Char('-') => {
+                        let min_adjust = match mode {
+                            Mode::Stopwatch => -(elapsed_secs as i64),
+                            Mode::Timer { .. } => -(total_secs as i64),
+                        };
+                        adjust_secs = (adjust_secs - 60).max(min_adjust);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
