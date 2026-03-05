@@ -14,6 +14,7 @@ cargo build --release    # release build
 cargo run                # stopwatch mode (counts up)
 cargo run -- 25m         # timer mode (countdown from duration)
 cargo run -- 14:30       # timer mode (countdown to target time)
+cargo run -- 25m -t foo  # timer with title
 cargo test               # run tests
 cargo clippy             # lint
 ```
@@ -26,8 +27,13 @@ cargo clippy             # lint
 
 ## Input Formats
 
-- **Duration**: `25m`, `90s`, `1h30m`, `2j` (days). Units: `j` (days), `h` (hours), `m` (minutes), `s` (seconds).
+- **Duration**: `25m`, `90s`, `1h30m`, `2d` (days). Units: `d` (days), `h` (hours), `m` (minutes), `s` (seconds).
 - **Target time**: `HH:MM` (24h format, e.g. `14:30`, `9:00`).
+
+## Options
+
+- `-s 1|2|3` — display size: 1 = text, 2 = compact, 3 = large (default)
+- `-t`, `--title TEXT...` — title above the timer. Must be last option (consumes all remaining args).
 
 ## Architecture
 

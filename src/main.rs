@@ -29,14 +29,14 @@ impl DisplaySize {
             DisplaySize::Compact => match ch {
                 '0'..='9' => Some(DIGITS_SM[ch as usize - '0' as usize]),
                 ':' => Some(&COLON_SM),
-                'j' => Some(&GLYPH_J_SM),
+                'd' => Some(&GLYPH_D_SM),
                 ' ' => Some(&GLYPH_SPACE_SM),
                 _ => None,
             },
             DisplaySize::Large => match ch {
                 '0'..='9' => Some(DIGITS[ch as usize - '0' as usize]),
                 ':' => Some(&COLON),
-                'j' => Some(&GLYPH_J),
+                'd' => Some(&GLYPH_D),
                 ' ' => Some(&GLYPH_SPACE),
                 _ => None,
             },
@@ -58,7 +58,7 @@ const DIGITS: [&[&str]; 10] = [
 ];
 
 const COLON: [&str; 7] = ["    ", " ██ ", " ██ ", "    ", " ██ ", " ██ ", "    "];
-const GLYPH_J: [&str; 7] = ["  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "███   "];
+const GLYPH_D: [&str; 7] = ["  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "███   "];
 const GLYPH_SPACE: [&str; 7] = ["    ", "    ", "    ", "    ", "    ", "    ", "    "];
 
 const DIGITS_SM: [&[&str]; 10] = [
@@ -74,7 +74,7 @@ const DIGITS_SM: [&[&str]; 10] = [
     &["███", "█ █", "███", "  █", "███"],
 ];
 const COLON_SM: [&str; 5] = ["   ", " █ ", "   ", " █ ", "   "];
-const GLYPH_J_SM: [&str; 5] = [" █ ", " █ ", " █ ", " █ ", "█  "];
+const GLYPH_D_SM: [&str; 5] = [" █ ", " █ ", " █ ", " █ ", "█  "];
 const GLYPH_SPACE_SM: [&str; 5] = ["   ", "   ", "   ", "   ", "   "];
 
 fn center_pad(available: usize, content: usize) -> String {
@@ -96,7 +96,7 @@ fn parse_duration(input: &str) -> Option<u64> {
 
     for c in input.chars() {
         match c {
-            'j' => {
+            'd' => {
                 total += current.parse::<u64>().ok()? * 86400;
                 current.clear();
             }
@@ -127,7 +127,7 @@ fn parse_duration(input: &str) -> Option<u64> {
 fn format_duration_human(secs: u64) -> String {
     let (d, h, m, s) = decompose_secs(secs);
     let mut parts = String::new();
-    if d > 0 { parts.push_str(&format!("{d}j")); }
+    if d > 0 { parts.push_str(&format!("{d}d")); }
     if h > 0 { parts.push_str(&format!("{h}h")); }
     if m > 0 { parts.push_str(&format!("{m}m")); }
     if s > 0 { parts.push_str(&format!("{s}s")); }
@@ -137,7 +137,7 @@ fn format_duration_human(secs: u64) -> String {
 fn format_time(secs: u64) -> String {
     let (d, h, m, s) = decompose_secs(secs);
     if d > 0 {
-        format!("{d}j {h}:{m:02}:{s:02}")
+        format!("{d}d {h}:{m:02}:{s:02}")
     } else if h > 0 {
         format!("{h}:{m:02}:{s:02}")
     } else {
@@ -226,24 +226,18 @@ fn main() {
                     "2" => size = DisplaySize::Compact,
                     "3" => size = DisplaySize::Large,
                     _ => {
-                        eprintln!("Option -s invalide : {} (valeurs possibles : 1, 2, 3)", val);
+                        eprintln!("Invalid -s option: {} (valid values: 1, 2, 3)", val);
                         std::process::exit(1);
                     }
                 }
             } else {
-                eprintln!("-s nécessite une valeur (1, 2, 3)");
+                eprintln!("-s requires a value (1, 2, 3)");
                 std::process::exit(1);
             }
         } else if arg == "--title" || arg == "-t" {
-            let mut title_words: Vec<String> = Vec::new();
-            while let Some(next) = args_iter.peek() {
-                if parse_duration(next).is_some() || parse_target_time(next).is_some() {
-                    break;
-                }
-                title_words.push(args_iter.next().unwrap().clone());
-            }
+            let title_words: Vec<String> = args_iter.by_ref().cloned().collect();
             if title_words.is_empty() {
-                eprintln!("--title nécessite une valeur");
+                eprintln!("--title requires a value");
                 std::process::exit(1);
             }
             title = Some(title_words.join(" "));
@@ -262,12 +256,12 @@ fn main() {
             let label = format!("({})", format_duration_human(secs));
             Mode::Timer { secs, label }
         } else {
-            eprintln!("Durée invalide : {}", remaining_args[0]);
-            eprintln!("Usage: pomo [-s 1|2|3] [--title TEXT] [durée|heure]  (ex: pomo, pomo -s 2 25m)");
+            eprintln!("Invalid duration: {}", remaining_args[0]);
+            eprintln!("Usage: pomo [-s 1|2|3] [duration|time] [--title TEXT]  (e.g. pomo 25m -t standup)");
             std::process::exit(1);
         }
     } else {
-        eprintln!("Usage: pomo [-s 1|2|3] [--title TEXT] [durée|heure]  (ex: pomo, pomo -s 2 25m)");
+        eprintln!("Usage: pomo [-s 1|2|3] [duration|time] [--title TEXT]  (e.g. pomo 25m -t standup)");
         std::process::exit(1);
     };
 
@@ -374,7 +368,7 @@ fn main() {
     }
 
     if matches!(mode, Mode::Timer { .. }) {
-        notify("Temps écoulé !");
+        notify("Time's up!");
     }
 
     drop(guard);
@@ -432,7 +426,7 @@ mod tests {
         assert_eq!(format_time(90), "01:30");
         assert_eq!(format_time(3661), "1:01:01");
         assert_eq!(format_time(0), "00:00");
-        assert_eq!(format_time(86400), "1j 0:00:00");
-        assert_eq!(format_time(2 * 86400 + 2 * 3600 + 13 * 60 + 5), "2j 2:13:05");
+        assert_eq!(format_time(86400), "1d 0:00:00");
+        assert_eq!(format_time(2 * 86400 + 2 * 3600 + 13 * 60 + 5), "2d 2:13:05");
     }
 }
