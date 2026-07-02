@@ -4,8 +4,8 @@ use crossterm::{
     style::{Print, SetForegroundColor, ResetColor, Color},
     terminal::{self, ClearType},
 };
-use std::{env, io::stdout, process::Command, time::{Duration, SystemTime}};
-use chrono::Local;
+use std::{env, fs, io::stdout, path::{Path, PathBuf}, process::Command, time::{Duration, SystemTime}};
+use chrono::{Local, NaiveDate, NaiveDateTime};
 
 #[derive(Clone, Copy)]
 enum DisplaySize {
@@ -171,19 +171,24 @@ enum Mode {
 }
 
 fn notify(msg: &str) {
-    // terminal-notifier doesn't open Script Editor on click (unlike osascript)
-    let ok = Command::new("terminal-notifier")
-        .args(["-title", "pomo", "-message", msg, "-sound", "Glass"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if ok {
-        return;
-    }
-    // Fallback: osascript (clicking the notification will open Script Editor)
-    let _ = Command::new("osascript")
-        .args(["-e", &format!("display notification \"{msg}\" with title \"pomo\" sound name \"Glass\"")])
-        .output();
+    blocking_dialog("pomo", msg);
+}
+
+/// Ring the alert sound and show a modal dialog that stays frontmost until the
+/// user clicks OK. Blocks the calling process until dismissed.
+fn blocking_dialog(title: &str, msg: &str) {
+    // Play the alert sound (non-blocking) so it rings while the dialog is up.
+    let _ = Command::new("afplay")
+        .arg("/System/Library/Sounds/Glass.aiff")
+        .spawn();
+    // AppleScript string literals: escape backslashes and double quotes.
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "display dialog \"{}\" with title \"{}\" buttons {{\"OK\"}} default button \"OK\" with icon note",
+        esc(msg),
+        esc(title),
+    );
+    let _ = Command::new("osascript").args(["-e", &script]).output();
 }
 
 fn parse_target_time(input: &str) -> Option<u64> {
@@ -210,8 +215,460 @@ fn parse_target_time(input: &str) -> Option<u64> {
     if diff <= 0 { None } else { Some(diff as u64) }
 }
 
+// ===== Scheduled reminders (launchd-backed, survive reboot) =====
+
+const LABEL_PREFIX: &str = "com.mick.pomo.";
+
+/// A recurring schedule for a reminder.
+enum Schedule {
+    /// Fire every N seconds (launchd StartInterval; launchd throttles to ~10s min).
+    Interval(u64),
+    /// Fire every day at HH:MM.
+    Daily { hour: u32, minute: u32 },
+    /// Fire on the given weekdays (launchd numbering: 0=Sun..6=Sat) at HH:MM.
+    Weekly { days: Vec<u32>, hour: u32, minute: u32 },
+}
+
+impl Schedule {
+    /// The launchd scheduling key(s), indented to sit inside the top-level <dict>.
+    fn xml(&self) -> String {
+        match self {
+            Schedule::Interval(secs) => {
+                format!("    <key>StartInterval</key>\n    <integer>{secs}</integer>")
+            }
+            Schedule::Daily { hour, minute } => format!(
+                "    <key>StartCalendarInterval</key>\n    <dict>\n        <key>Hour</key><integer>{hour}</integer>\n        <key>Minute</key><integer>{minute}</integer>\n    </dict>"
+            ),
+            Schedule::Weekly { days, hour, minute } => {
+                let mut items = String::new();
+                for d in days {
+                    items.push_str(&format!(
+                        "        <dict><key>Weekday</key><integer>{d}</integer><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict>\n"
+                    ));
+                }
+                format!("    <key>StartCalendarInterval</key>\n    <array>\n{items}    </array>")
+            }
+        }
+    }
+
+    /// Human-readable one-liner for confirmations and `remind list`.
+    fn human(&self) -> String {
+        match self {
+            Schedule::Interval(secs) => format!("every {}", format_duration_human(*secs)),
+            Schedule::Daily { hour, minute } => format!("daily at {hour:02}:{minute:02}"),
+            Schedule::Weekly { days, hour, minute } => {
+                let names: Vec<&str> = days.iter().map(|d| weekday_name(*d)).collect();
+                format!("weekly on {} at {hour:02}:{minute:02}", names.join(","))
+            }
+        }
+    }
+}
+
+fn weekday_name(d: u32) -> &'static str {
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        .get(d as usize)
+        .copied()
+        .unwrap_or("?")
+}
+
+fn parse_weekday(s: &str) -> Option<u32> {
+    match s.to_lowercase().as_str() {
+        "sun" | "sunday" | "dim" | "dimanche" => Some(0),
+        "mon" | "monday" | "lun" | "lundi" => Some(1),
+        "tue" | "tuesday" | "mar" | "mardi" => Some(2),
+        "wed" | "wednesday" | "mer" | "mercredi" => Some(3),
+        "thu" | "thursday" | "jeu" | "jeudi" => Some(4),
+        "fri" | "friday" | "ven" | "vendredi" => Some(5),
+        "sat" | "saturday" | "sam" | "samedi" => Some(6),
+        _ => None,
+    }
+}
+
+fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
+    let (h, m) = s.split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    (h < 24 && m < 60).then_some((h, m))
+}
+
+/// Parse an --until value: a bare date (that day at 00:00) or a datetime.
+/// The reminder self-removes once now >= this instant.
+fn parse_until(s: &str) -> Option<NaiveDateTime> {
+    let norm = s.replace('T', " ");
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&norm, "%Y-%m-%d %H:%M") {
+        return Some(dt);
+    }
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().and_then(|d| d.and_hms_opt(0, 0, 0))
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let out: String = out.trim_matches('-').chars().take(40).collect();
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() { "reminder".to_string() } else { out }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn fail(msg: &str) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(1);
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(env::var("HOME").expect("HOME not set"))
+}
+fn agents_dir() -> PathBuf {
+    home().join("Library/LaunchAgents")
+}
+fn meta_dir() -> PathBuf {
+    home().join(".pomo/reminders")
+}
+fn plist_path(label: &str) -> PathBuf {
+    agents_dir().join(format!("{label}.plist"))
+}
+fn meta_path(name: &str) -> PathBuf {
+    meta_dir().join(format!("{name}.meta"))
+}
+
+fn current_uid() -> String {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn load_agent(plist: &Path, label: &str) {
+    let uid = current_uid();
+    // Remove any prior instance so re-scheduling the same name is idempotent.
+    let _ = Command::new("launchctl")
+        .args(["bootout".to_string(), format!("gui/{uid}/{label}")])
+        .output();
+    let out = Command::new("launchctl")
+        .args([
+            "bootstrap".to_string(),
+            format!("gui/{uid}"),
+            plist.to_string_lossy().to_string(),
+        ])
+        .output();
+    if let Ok(o) = out
+        && !o.status.success()
+    {
+        let err = String::from_utf8_lossy(&o.stderr);
+        if !err.trim().is_empty() {
+            eprintln!("launchctl: {}", err.trim());
+        }
+    }
+}
+
+fn unload_agent(label: &str) {
+    let uid = current_uid();
+    let _ = Command::new("launchctl")
+        .args(["bootout".to_string(), format!("gui/{uid}/{label}")])
+        .output();
+}
+
+fn remind_create(msg: String, sched: Schedule, until: Option<String>, name: String) {
+    let label = format!("{LABEL_PREFIX}{name}");
+    let exe = env::current_exe()
+        .expect("current_exe")
+        .to_string_lossy()
+        .to_string();
+    let mut prog = vec![
+        exe,
+        "__fire".to_string(),
+        "--label".to_string(),
+        label.clone(),
+        "--msg".to_string(),
+        msg.clone(),
+    ];
+    if let Some(u) = &until {
+        prog.push("--until".to_string());
+        prog.push(u.clone());
+    }
+    let prog_xml: String = prog
+        .iter()
+        .map(|a| format!("        <string>{}</string>\n", xml_escape(a)))
+        .collect();
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{prog_xml}    </array>
+{sched_xml}
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardErrorPath</key>
+    <string>/tmp/{label}.err</string>
+</dict>
+</plist>
+"#,
+        sched_xml = sched.xml()
+    );
+    fs::create_dir_all(agents_dir()).ok();
+    fs::create_dir_all(meta_dir()).ok();
+    let pp = plist_path(&label);
+    fs::write(&pp, plist).unwrap_or_else(|e| fail(&format!("Failed to write plist: {e}")));
+    let meta = format!(
+        "name={name}\nlabel={label}\nschedule={}\nmsg={}\nuntil={}\n",
+        sched.human(),
+        msg.replace('\n', " "),
+        until.clone().unwrap_or_default(),
+    );
+    fs::write(meta_path(&name), meta).ok();
+    load_agent(&pp, &label);
+    println!("Reminder '{name}' scheduled: {}.", sched.human());
+    if let Some(u) = &until {
+        println!("  Active until {u} (removes itself afterwards).");
+    }
+    println!("  Message: {msg}");
+    println!("  Remove with: pomo remind rm {name}");
+}
+
+fn remind_list() {
+    let mut found = false;
+    if let Ok(entries) = fs::read_dir(meta_dir()) {
+        let mut metas: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "meta").unwrap_or(false))
+            .collect();
+        metas.sort();
+        for p in metas {
+            if let Ok(content) = fs::read_to_string(&p) {
+                let get = |k: &str| -> String {
+                    content
+                        .lines()
+                        .find_map(|l| l.strip_prefix(&format!("{k}=")))
+                        .unwrap_or("")
+                        .to_string()
+                };
+                found = true;
+                let name = get("name");
+                let sched = get("schedule");
+                let msg = get("msg");
+                let until = get("until");
+                let until_suffix = if until.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ·  until {until}")
+                };
+                println!("• {name}");
+                println!("    {sched}{until_suffix}");
+                println!("    \"{msg}\"");
+            }
+        }
+    }
+    if !found {
+        println!("No reminders scheduled.");
+    }
+}
+
+fn remind_rm(name: &str) {
+    let label = format!("{LABEL_PREFIX}{name}");
+    unload_agent(&label);
+    let pp = plist_path(&label);
+    let existed = pp.exists();
+    fs::remove_file(&pp).ok();
+    fs::remove_file(meta_path(name)).ok();
+    if existed {
+        println!("Removed reminder '{name}'.");
+    } else {
+        eprintln!("No reminder named '{name}'.");
+        std::process::exit(1);
+    }
+}
+
+fn print_remind_usage() {
+    eprintln!("Usage:");
+    eprintln!("  pomo remind \"message\" --every 30m            # interval: s/m/h/d");
+    eprintln!("  pomo remind \"message\" --daily 09:00          # every day at HH:MM");
+    eprintln!("  pomo remind \"message\" --weekly mon,wed 09:00 # given weekdays at HH:MM");
+    eprintln!("  pomo remind ... --until 2026-07-15           # auto-removes afterwards");
+    eprintln!("  pomo remind ... --name <slug>                # explicit name (default: from message)");
+    eprintln!("  pomo remind list");
+    eprintln!("  pomo remind rm <name>");
+}
+
+fn remind_parse_create(args: &[String]) {
+    let mut msg: Option<String> = None;
+    let mut every: Option<String> = None;
+    let mut daily: Option<String> = None;
+    let mut weekly: Option<(String, String)> = None;
+    let mut until: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--every" => {
+                every = Some(it.next().cloned().unwrap_or_else(|| {
+                    fail("--every needs a duration (e.g. 30s, 15m, 2h, 1d)")
+                }))
+            }
+            "--daily" => {
+                daily = Some(
+                    it.next()
+                        .cloned()
+                        .unwrap_or_else(|| fail("--daily needs a time (HH:MM)")),
+                )
+            }
+            "--weekly" => {
+                let d = it.next().cloned().unwrap_or_else(|| {
+                    fail("--weekly needs days then a time, e.g. --weekly mon,wed,fri 09:00")
+                });
+                let t = it.next().cloned().unwrap_or_else(|| {
+                    fail("--weekly needs a time after the days, e.g. --weekly mon,wed,fri 09:00")
+                });
+                weekly = Some((d, t));
+            }
+            "--until" => {
+                until = Some(it.next().cloned().unwrap_or_else(|| {
+                    fail("--until needs a date (YYYY-MM-DD) or datetime (YYYY-MM-DD HH:MM)")
+                }))
+            }
+            "--name" => {
+                name = Some(
+                    it.next()
+                        .cloned()
+                        .unwrap_or_else(|| fail("--name needs a value")),
+                )
+            }
+            s if s.starts_with("--") => fail(&format!("Unknown option: {s}")),
+            _ => {
+                if msg.is_none() {
+                    msg = Some(a.clone());
+                } else {
+                    fail("Multiple message words detected — wrap the message in quotes: pomo remind \"your message\" --daily 09:00");
+                }
+            }
+        }
+    }
+    let msg = msg.unwrap_or_else(|| {
+        print_remind_usage();
+        std::process::exit(1);
+    });
+    let count = every.is_some() as u8 + daily.is_some() as u8 + weekly.is_some() as u8;
+    if count == 0 {
+        fail("Choose a schedule: --every DUR, --daily HH:MM, or --weekly DAYS HH:MM");
+    }
+    if count > 1 {
+        fail("Choose only one of --every / --daily / --weekly");
+    }
+    let sched = if let Some(e) = every {
+        let secs = parse_duration(&e).unwrap_or_else(|| fail(&format!("Invalid duration: {e}")));
+        Schedule::Interval(secs)
+    } else if let Some(d) = daily {
+        let (hour, minute) =
+            parse_hhmm(&d).unwrap_or_else(|| fail(&format!("Invalid time: {d} (expected HH:MM)")));
+        Schedule::Daily { hour, minute }
+    } else {
+        let (ds, t) = weekly.unwrap();
+        let (hour, minute) =
+            parse_hhmm(&t).unwrap_or_else(|| fail(&format!("Invalid time: {t} (expected HH:MM)")));
+        let days: Vec<u32> = ds
+            .split(',')
+            .map(|d| {
+                parse_weekday(d.trim()).unwrap_or_else(|| {
+                    fail(&format!("Invalid day: {d} (use mon,tue,wed,thu,fri,sat,sun)"))
+                })
+            })
+            .collect();
+        Schedule::Weekly { days, hour, minute }
+    };
+    if let Some(u) = &until
+        && parse_until(u).is_none()
+    {
+        fail(&format!(
+            "Invalid --until date: {u} (expected YYYY-MM-DD or YYYY-MM-DD HH:MM)"
+        ));
+    }
+    let name = name.unwrap_or_else(|| slugify(&msg));
+    remind_create(msg, sched, until, name);
+}
+
+fn remind_cmd(args: &[String]) {
+    match args.first().map(|s| s.as_str()) {
+        None => {
+            print_remind_usage();
+            std::process::exit(1);
+        }
+        Some("list") => remind_list(),
+        Some("rm") | Some("remove") => match args.get(1) {
+            Some(n) => remind_rm(n),
+            None => fail("Usage: pomo remind rm <name>"),
+        },
+        _ => remind_parse_create(args),
+    }
+}
+
+/// Invoked by launchd. Show the reminder, or tear it down if --until has passed.
+fn fire_cmd(args: &[String]) {
+    let mut label = String::new();
+    let mut msg = String::new();
+    let mut until: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--label" => label = it.next().cloned().unwrap_or_default(),
+            "--msg" => msg = it.next().cloned().unwrap_or_default(),
+            "--until" => until = it.next().cloned(),
+            _ => {}
+        }
+    }
+    if let Some(u) = &until
+        && let Some(dt) = parse_until(u)
+        && Local::now().naive_local() >= dt
+    {
+        // Deadline passed: delete our own files FIRST, because the bootout below
+        // terminates this very process (we are the launchd job) and would
+        // otherwise kill us before the files are removed.
+        fs::remove_file(plist_path(&label)).ok();
+        if let Some(name) = label.strip_prefix(LABEL_PREFIX) {
+            fs::remove_file(meta_path(name)).ok();
+        }
+        unload_agent(&label);
+        return;
+    }
+    blocking_dialog("Reminder", &msg);
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    match args.get(1).map(|s| s.as_str()) {
+        Some("remind") => {
+            remind_cmd(&args[2..]);
+            return;
+        }
+        Some("__fire") => {
+            fire_cmd(&args[2..]);
+            return;
+        }
+        _ => {}
+    }
 
     // Parse options
     let mut title: Option<String> = None;

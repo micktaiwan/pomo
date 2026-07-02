@@ -1,6 +1,6 @@
 # pomo
 
-CLI timer / pomodoro / stopwatch for the terminal, with large ASCII digits and macOS notifications.
+CLI timer / pomodoro / stopwatch for the terminal, with large ASCII digits, a blocking end-of-timer dialog, and launchd-backed scheduled reminders that survive reboot.
 
 ## Usage
 
@@ -27,17 +27,40 @@ pomo -s 2 25m                 # compact display size
 - `Space` / `p` — pause / resume
 - `+` / `-` — adjust time by ±1 minute
 
-## Notifications
+## End-of-timer dialog
 
-When a timer ends, a macOS notification with sound is sent.
+When a timer ends, pomo plays the Glass alert sound and shows a **blocking modal
+dialog** (via `osascript`) that stays frontmost until you click OK — impossible to
+miss, unlike a notification that stacks in Notification Center. No external
+dependency required.
 
-For best results, install [terminal-notifier](https://github.com/julienXX/terminal-notifier):
+## Reminders
+
+Schedule recurring reminders that survive reboot. Each reminder is a launchd
+LaunchAgent that fires the same blocking dialog on a schedule.
 
 ```bash
-brew install terminal-notifier
+pomo remind "message" --every 30m                    # interval: s / m / h / d
+pomo remind "message" --daily 09:00                  # every day at HH:MM
+pomo remind "message" --weekly mon,wed,fri 09:30     # given weekdays at HH:MM
+pomo remind "message" --daily 09:00 --until 2026-07-15   # auto-removes afterwards
+pomo remind "message" --daily 09:00 --name my-slug   # explicit name (default: from message)
+pomo remind list                                     # list active reminders
+pomo remind rm <name>                                # remove one
 ```
 
-Without it, pomo falls back to `osascript` (clicking the notification will open Script Editor).
+Exactly one schedule is required (`--every` / `--daily` / `--weekly`).
+
+Notes:
+
+- **`--every` floor**: launchd throttles relaunches to ~10s minimum, so very short
+  intervals are smoothed to about 10 seconds.
+- **`--until DATE`** stops the reminder once now reaches that instant. A bare date
+  (`2026-07-15`) means midnight that day, so the last fire is the day before; pass
+  `--until 2026-07-16` (or a datetime) to include the 15th. When the deadline
+  passes, the reminder deletes its own LaunchAgent and metadata.
+- LaunchAgents live in `~/Library/LaunchAgents/com.mick.pomo.<name>.plist`;
+  metadata for `list` lives in `~/.pomo/reminders/<name>.meta`.
 
 ## Build
 
