@@ -667,6 +667,18 @@ fn main() {
             fire_cmd(&args[2..]);
             return;
         }
+        // Root-level shortcuts for reminders (list/rm are not valid durations).
+        Some("list") => {
+            remind_list();
+            return;
+        }
+        Some("rm") | Some("remove") => {
+            match args.get(2) {
+                Some(n) => remind_rm(n),
+                None => fail("Usage: pomo rm <name>"),
+            }
+            return;
+        }
         _ => {}
     }
 

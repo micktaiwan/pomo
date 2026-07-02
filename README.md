@@ -49,6 +49,8 @@ pomo remind list                                     # list active reminders
 pomo remind rm <name>                                # remove one
 ```
 
+`pomo list` and `pomo rm <name>` are root-level shortcuts for the two above.
+
 Exactly one schedule is required (`--every` / `--daily` / `--weekly`).
 
 Notes:
