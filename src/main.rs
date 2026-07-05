@@ -181,8 +181,17 @@ fn blocking_dialog(title: &str, msg: &str) {
     let _ = Command::new("afplay")
         .arg("/System/Library/Sounds/Glass.aiff")
         .spawn();
-    // AppleScript string literals: escape backslashes and double quotes.
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    // AppleScript string literals: escape backslashes and double quotes, then
+    // splice newlines back in as `" & return & "` — a raw linefeed inside an
+    // AppleScript string literal is a syntax error, so an unescaped multi-line
+    // message would make osascript fail and the dialog silently never appear.
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace("\r\n", "\" & return & \"")
+            .replace('\n', "\" & return & \"")
+            .replace('\r', "\" & return & \"")
+    };
     let script = format!(
         "display dialog \"{}\" with title \"{}\" buttons {{\"OK\"}} default button \"OK\" with icon note",
         esc(msg),
@@ -605,7 +614,10 @@ fn remind_parse_create(args: &[String]) {
             "Invalid --until date: {u} (expected YYYY-MM-DD or YYYY-MM-DD HH:MM)"
         ));
     }
-    let name = name.unwrap_or_else(|| slugify(&msg));
+    // Always slugify: an explicit --name goes into the plist Label and
+    // StandardErrorPath (which are not XML-escaped), so it must be reduced to
+    // the same safe alphanumeric/dash slug as a name derived from the message.
+    let name = slugify(&name.unwrap_or_else(|| msg.clone()));
     remind_create(msg, sched, until, name);
 }
 
