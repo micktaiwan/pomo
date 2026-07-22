@@ -21,6 +21,13 @@ pomo -s 2 25m                 # compact display size
 - `-s 1|2|3` — display size: 1 = text, 2 = compact, 3 = large (default)
 - `-t`, `--title TEXT...` — title displayed above the timer. Must be last option (all remaining args are the title).
 
+### Terminal title
+
+While running, pomo mirrors the countdown into the terminal title (window, tab,
+or pane title depending on the terminal) via the standard OSC escape sequence:
+`<title> — MM:SS` with `-t`, `pomo MM:SS` without. The previous title is
+restored on exit.
+
 ### Controls
 
 - `q` / `Esc` / `Ctrl+C` — quit

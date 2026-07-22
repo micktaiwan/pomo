@@ -42,5 +42,6 @@ Single `src/main.rs`. Key components:
 - `parse_target_time` — parses target time (`HH:MM`) and computes remaining seconds
 - `render_big` — ASCII digit rendering (7-line high glyphs), centered horizontally
 - Main loop uses `Instant`-based timing (no drift), polls crossterm events at 100ms
+- Terminal title mirrors the countdown via OSC 0 (`osc_title`), saved/restored with XTWINOPS push/pop
 - Alternate screen + raw mode with `RawModeGuard` (Drop-based cleanup)
 - macOS notification via `osascript`

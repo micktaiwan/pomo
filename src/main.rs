@@ -145,6 +145,36 @@ fn format_time(secs: u64) -> String {
     }
 }
 
+/// Width in columns the given time string would occupy at the given size,
+/// matching render_big's layout (each glyph followed by two spaces).
+fn rendered_width(time_str: &str, size: DisplaySize) -> usize {
+    if matches!(size, DisplaySize::Text) {
+        return time_str.chars().count();
+    }
+    time_str
+        .chars()
+        .filter_map(|ch| size.glyph(ch))
+        .map(|g| g[0].chars().count() + 2)
+        .sum()
+}
+
+/// Pick the largest size, starting from `desired` and stepping down, whose
+/// rendered width fits within the terminal. Falls back to Text if nothing fits.
+fn fit_size(time_str: &str, term_width: u16, desired: DisplaySize) -> DisplaySize {
+    let ladder = [DisplaySize::Large, DisplaySize::Compact, DisplaySize::Text];
+    let start = match desired {
+        DisplaySize::Large => 0,
+        DisplaySize::Compact => 1,
+        DisplaySize::Text => 2,
+    };
+    for &s in &ladder[start..] {
+        if rendered_width(time_str, s) <= term_width as usize {
+            return s;
+        }
+    }
+    DisplaySize::Text
+}
+
 fn render_big(time_str: &str, term_width: u16, size: DisplaySize) -> String {
     if matches!(size, DisplaySize::Text) {
         let pad = center_pad(term_width as usize, time_str.len());
@@ -170,6 +200,11 @@ enum Mode {
     Stopwatch,
 }
 
+/// OSC 0 sequence setting the terminal window/tab/pane title.
+fn osc_title(s: &str) -> String {
+    format!("\x1b]0;{s}\x07")
+}
+
 fn notify(msg: &str) {
     blocking_dialog("pomo", msg);
 }
@@ -177,6 +212,13 @@ fn notify(msg: &str) {
 /// Ring the alert sound and show a modal dialog that stays frontmost until the
 /// user clicks OK. Blocks the calling process until dismissed.
 fn blocking_dialog(title: &str, msg: &str) {
+    show_dialog(title, msg, &["OK"], "OK");
+}
+
+/// Ring the alert sound and show a modal dialog with the given buttons, staying
+/// frontmost until dismissed. Blocks the calling process and returns the label
+/// of the clicked button (empty string if osascript failed to run).
+fn show_dialog(title: &str, msg: &str, buttons: &[&str], default: &str) -> String {
     // Play the alert sound (non-blocking) so it rings while the dialog is up.
     let _ = Command::new("afplay")
         .arg("/System/Library/Sounds/Glass.aiff")
@@ -192,12 +234,30 @@ fn blocking_dialog(title: &str, msg: &str) {
             .replace('\n', "\" & return & \"")
             .replace('\r', "\" & return & \"")
     };
+    let button_list = buttons
+        .iter()
+        .map(|b| format!("\"{}\"", esc(b)))
+        .collect::<Vec<_>>()
+        .join(", ");
     let script = format!(
-        "display dialog \"{}\" with title \"{}\" buttons {{\"OK\"}} default button \"OK\" with icon note",
+        "display dialog \"{}\" with title \"{}\" buttons {{{}}} default button \"{}\" with icon note",
         esc(msg),
         esc(title),
+        button_list,
+        esc(default),
     );
-    let _ = Command::new("osascript").args(["-e", &script]).output();
+    let out = Command::new("osascript").args(["-e", &script]).output();
+    // osascript prints `button returned:<label>` on stdout for the clicked button.
+    out.map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .split("button returned:")
+            .nth(1)
+            .and_then(|s| s.lines().next())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    })
+    .unwrap_or_default()
 }
 
 fn parse_target_time(input: &str) -> Option<u64> {
@@ -664,7 +724,17 @@ fn fire_cmd(args: &[String]) {
         unload_agent(&label);
         return;
     }
-    blocking_dialog("Reminder", &msg);
+    // Two-button dialog: OK just dismisses; Disable tears the reminder down so
+    // it never fires again (same teardown as `pomo remind rm`).
+    if show_dialog("Reminder", &msg, &["Disable", "OK"], "OK") == "Disable" {
+        // Remove our own files FIRST: unload_agent below boots out this very
+        // launchd job and would otherwise kill us before the files are removed.
+        fs::remove_file(plist_path(&label)).ok();
+        if let Some(name) = label.strip_prefix(LABEL_PREFIX) {
+            fs::remove_file(meta_path(name)).ok();
+        }
+        unload_agent(&label);
+    }
 }
 
 fn main() {
@@ -749,6 +819,8 @@ fn main() {
     let mut stdout = stdout();
     terminal::enable_raw_mode().expect("raw mode");
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide).ok();
+    // Save the current title (XTWINOPS push); the guard pops it back on exit.
+    execute!(stdout, Print("\x1b[22;0t")).ok();
     let guard = RawModeGuard;
 
     let start = SystemTime::now();
@@ -760,6 +832,7 @@ fn main() {
         Mode::Timer { secs, label } => (*secs, label.clone()),
         Mode::Stopwatch => (0, String::new()),
     };
+    let mut last_title = String::new();
 
     loop {
         let raw_elapsed = start.elapsed().unwrap_or_default();
@@ -782,8 +855,20 @@ fn main() {
 
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let time_str = format_time(display_secs);
-        let big = render_big(&time_str, cols, size);
-        let digit_lines = size.height() as u16;
+
+        // Mirror the timer into the terminal title (Kova pane title, tab title…).
+        let pane_title = match &title {
+            Some(t) => format!("{t} — {time_str}"),
+            None => format!("pomo {time_str}"),
+        };
+        if pane_title != last_title {
+            execute!(stdout, Print(osc_title(&pane_title))).ok();
+            last_title = pane_title;
+        }
+
+        let eff_size = fit_size(&time_str, cols, size);
+        let big = render_big(&time_str, cols, eff_size);
+        let digit_lines = eff_size.height() as u16;
         let title_lines: u16 = if title.is_some() { 2 } else { 0 };
         let total_lines = title_lines + digit_lines + 2; // digits + blank + label
         let top = if rows > total_lines { (rows - total_lines) / 2 } else { 0 };
@@ -848,13 +933,16 @@ fn main() {
         }
     }
 
+    // Capture end time and duration before the blocking dialog: it stays open
+    // until the user clicks OK, which would otherwise inflate both.
+    let end_time = Local::now();
+    let elapsed = format_duration_human(start.elapsed().unwrap_or_default().as_secs());
+
     if matches!(mode, Mode::Timer { .. }) {
         notify("Time's up!");
     }
 
     drop(guard);
-    let end_time = Local::now();
-    let elapsed = format_duration_human(start.elapsed().unwrap_or_default().as_secs());
     println!();
     println!("  Started:  {}", start_time.format("%Y-%m-%d %H:%M:%S"));
     println!("  Duration: {}", elapsed);
@@ -866,6 +954,9 @@ struct RawModeGuard;
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
+        // Clear the title (fallback for terminals without XTWINOPS), then pop
+        // the saved one back where supported.
+        let _ = execute!(stdout(), Print(osc_title("")), Print("\x1b[23;0t"));
         let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);
         let _ = terminal::disable_raw_mode();
     }
