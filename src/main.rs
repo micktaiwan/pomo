@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::{env, fs, io::stdout, path::{Path, PathBuf}, process::Command, time::{Duration, SystemTime}};
-use chrono::{Local, NaiveDate, NaiveDateTime};
+use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, Timelike};
 
 #[derive(Clone, Copy)]
 enum DisplaySize {
@@ -296,6 +296,8 @@ enum Schedule {
     Daily { hour: u32, minute: u32 },
     /// Fire on the given weekdays (launchd numbering: 0=Sun..6=Sat) at HH:MM.
     Weekly { days: Vec<u32>, hour: u32, minute: u32 },
+    /// Fire once at a given date and time, then remove itself.
+    Once(NaiveDateTime),
 }
 
 impl Schedule {
@@ -317,6 +319,15 @@ impl Schedule {
                 }
                 format!("    <key>StartCalendarInterval</key>\n    <array>\n{items}    </array>")
             }
+            // Month + Day pins the single date; the job deletes itself once
+            // fired, so it never comes back a year later.
+            Schedule::Once(at) => format!(
+                "    <key>StartCalendarInterval</key>\n    <dict>\n        <key>Month</key><integer>{}</integer>\n        <key>Day</key><integer>{}</integer>\n        <key>Hour</key><integer>{}</integer>\n        <key>Minute</key><integer>{}</integer>\n    </dict>",
+                at.month(),
+                at.day(),
+                at.hour(),
+                at.minute()
+            ),
         }
     }
 
@@ -329,6 +340,7 @@ impl Schedule {
                 let names: Vec<&str> = days.iter().map(|d| weekday_name(*d)).collect();
                 format!("weekly on {} at {hour:02}:{minute:02}", names.join(","))
             }
+            Schedule::Once(at) => format!("once at {}", at.format("%Y-%m-%d %H:%M")),
         }
     }
 }
@@ -368,6 +380,37 @@ fn parse_until(s: &str) -> Option<NaiveDateTime> {
         return Some(dt);
     }
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().and_then(|d| d.and_hms_opt(0, 0, 0))
+}
+
+/// Parse an --at value for a one-shot reminder. Accepts an explicit datetime
+/// (`2026-08-12 09:00`, `T` separator allowed), a time today or tomorrow
+/// (`09:00`, taken as tomorrow when it has already passed), `tomorrow 09:00`,
+/// or a delay from now (`30m`, `2h`).
+fn parse_at(s: &str) -> Option<NaiveDateTime> {
+    let s = s.trim();
+    let norm = s.replace('T', " ");
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&norm, "%Y-%m-%d %H:%M") {
+        return Some(dt);
+    }
+    let now = Local::now().naive_local();
+    let lower = norm.to_lowercase();
+    if let Some(rest) = lower
+        .strip_prefix("tomorrow ")
+        .or_else(|| lower.strip_prefix("demain "))
+    {
+        let (hour, minute) = parse_hhmm(rest.trim())?;
+        return (now.date() + ChronoDuration::days(1)).and_hms_opt(hour, minute, 0);
+    }
+    if let Some((hour, minute)) = parse_hhmm(s) {
+        let today = now.date().and_hms_opt(hour, minute, 0)?;
+        return Some(if today > now {
+            today
+        } else {
+            today + ChronoDuration::days(1)
+        });
+    }
+    let secs = parse_duration(s)?;
+    Some(now + ChronoDuration::seconds(secs as i64))
 }
 
 fn slugify(s: &str) -> String {
@@ -473,6 +516,10 @@ fn remind_create(msg: String, sched: Schedule, until: Option<String>, name: Stri
         prog.push("--until".to_string());
         prog.push(u.clone());
     }
+    if matches!(sched, Schedule::Once(_)) {
+        // Tells the fired job to tear itself down: a one-shot never repeats.
+        prog.push("--once".to_string());
+    }
     let prog_xml: String = prog
         .iter()
         .map(|a| format!("        <string>{}</string>\n", xml_escape(a)))
@@ -573,6 +620,7 @@ fn remind_rm(name: &str) {
 
 fn print_remind_usage() {
     eprintln!("Usage:");
+    eprintln!("  pomo remind \"message\" --at 09:00             # once: HH:MM, YYYY-MM-DD HH:MM, or a delay (2h)");
     eprintln!("  pomo remind \"message\" --every 30m            # interval: s/m/h/d");
     eprintln!("  pomo remind \"message\" --daily 09:00          # every day at HH:MM");
     eprintln!("  pomo remind \"message\" --weekly mon,wed 09:00 # given weekdays at HH:MM");
@@ -587,6 +635,7 @@ fn remind_parse_create(args: &[String]) {
     let mut every: Option<String> = None;
     let mut daily: Option<String> = None;
     let mut weekly: Option<(String, String)> = None;
+    let mut at: Option<String> = None;
     let mut until: Option<String> = None;
     let mut name: Option<String> = None;
     let mut it = args.iter();
@@ -612,6 +661,11 @@ fn remind_parse_create(args: &[String]) {
                     fail("--weekly needs a time after the days, e.g. --weekly mon,wed,fri 09:00")
                 });
                 weekly = Some((d, t));
+            }
+            "--at" => {
+                at = Some(it.next().cloned().unwrap_or_else(|| {
+                    fail("--at needs a time (09:00), a datetime (2026-08-12 09:00), or a delay (2h)")
+                }))
             }
             "--until" => {
                 until = Some(it.next().cloned().unwrap_or_else(|| {
@@ -639,14 +693,27 @@ fn remind_parse_create(args: &[String]) {
         print_remind_usage();
         std::process::exit(1);
     });
-    let count = every.is_some() as u8 + daily.is_some() as u8 + weekly.is_some() as u8;
+    let count = every.is_some() as u8
+        + daily.is_some() as u8
+        + weekly.is_some() as u8
+        + at.is_some() as u8;
     if count == 0 {
-        fail("Choose a schedule: --every DUR, --daily HH:MM, or --weekly DAYS HH:MM");
+        fail("Choose a schedule: --at WHEN, --every DUR, --daily HH:MM, or --weekly DAYS HH:MM");
     }
     if count > 1 {
-        fail("Choose only one of --every / --daily / --weekly");
+        fail("Choose only one of --at / --every / --daily / --weekly");
     }
-    let sched = if let Some(e) = every {
+    let sched = if let Some(a) = at {
+        let when = parse_at(&a).unwrap_or_else(|| {
+            fail(&format!(
+                "Invalid --at value: {a} (expected HH:MM, YYYY-MM-DD HH:MM, tomorrow HH:MM, or a delay like 2h)"
+            ))
+        });
+        if when <= Local::now().naive_local() {
+            fail(&format!("--at {a} is in the past"));
+        }
+        Schedule::Once(when)
+    } else if let Some(e) = every {
         let secs = parse_duration(&e).unwrap_or_else(|| fail(&format!("Invalid duration: {e}")));
         Schedule::Interval(secs)
     } else if let Some(d) = daily {
@@ -701,12 +768,14 @@ fn fire_cmd(args: &[String]) {
     let mut label = String::new();
     let mut msg = String::new();
     let mut until: Option<String> = None;
+    let mut once = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--label" => label = it.next().cloned().unwrap_or_default(),
             "--msg" => msg = it.next().cloned().unwrap_or_default(),
             "--until" => until = it.next().cloned(),
+            "--once" => once = true,
             _ => {}
         }
     }
@@ -726,7 +795,8 @@ fn fire_cmd(args: &[String]) {
     }
     // Two-button dialog: OK just dismisses; Disable tears the reminder down so
     // it never fires again (same teardown as `pomo remind rm`).
-    if show_dialog("Reminder", &msg, &["Disable", "OK"], "OK") == "Disable" {
+    // A one-shot tears itself down whichever button was clicked: it has fired.
+    if show_dialog("Reminder", &msg, &["Disable", "OK"], "OK") == "Disable" || once {
         // Remove our own files FIRST: unload_agent below boots out this very
         // launchd job and would otherwise kill us before the files are removed.
         fs::remove_file(plist_path(&label)).ok();
@@ -991,6 +1061,46 @@ mod tests {
         assert_eq!(parse_target_time("12"), None);
         assert_eq!(parse_target_time("12:00:00"), None);
         assert_eq!(parse_target_time(""), None);
+    }
+
+    #[test]
+    fn test_parse_at() {
+        let now = Local::now().naive_local();
+
+        // Explicit datetime, both separators.
+        assert_eq!(
+            parse_at("2026-08-12 09:00"),
+            NaiveDate::from_ymd_opt(2026, 8, 12).unwrap().and_hms_opt(9, 0, 0)
+        );
+        assert_eq!(parse_at("2026-08-12T09:00"), parse_at("2026-08-12 09:00"));
+
+        // A delay from now lands in the future.
+        let in_two_hours = parse_at("2h").unwrap();
+        assert!(in_two_hours > now);
+        assert!((in_two_hours - now).num_minutes() >= 119);
+
+        // Bare HH:MM always resolves to the next occurrence.
+        assert!(parse_at("09:00").unwrap() > now);
+        assert!(parse_at("tomorrow 09:00").unwrap() > now);
+
+        // Rejected.
+        assert_eq!(parse_at("25:00"), None);
+        assert_eq!(parse_at("abc"), None);
+        assert_eq!(parse_at(""), None);
+    }
+
+    #[test]
+    fn test_once_schedule_xml_pins_the_date() {
+        let at = NaiveDate::from_ymd_opt(2026, 8, 12)
+            .unwrap()
+            .and_hms_opt(9, 5, 0)
+            .unwrap();
+        let xml = Schedule::Once(at).xml();
+        assert!(xml.contains("<key>Month</key><integer>8</integer>"));
+        assert!(xml.contains("<key>Day</key><integer>12</integer>"));
+        assert!(xml.contains("<key>Hour</key><integer>9</integer>"));
+        assert!(xml.contains("<key>Minute</key><integer>5</integer>"));
+        assert_eq!(Schedule::Once(at).human(), "once at 2026-08-12 09:05");
     }
 
     #[test]

@@ -43,10 +43,13 @@ dependency required.
 
 ## Reminders
 
-Schedule recurring reminders that survive reboot. Each reminder is a launchd
-LaunchAgent that fires the same blocking dialog on a schedule.
+Schedule one-shot or recurring reminders that survive reboot. Each reminder is a
+launchd LaunchAgent that fires the same blocking dialog on a schedule.
 
 ```bash
+pomo remind "message" --at 09:00                     # once, at the next 09:00
+pomo remind "message" --at "2026-08-12 09:00"        # once, at an explicit datetime
+pomo remind "message" --at 2h                        # once, after a delay
 pomo remind "message" --every 30m                    # interval: s / m / h / d
 pomo remind "message" --daily 09:00                  # every day at HH:MM
 pomo remind "message" --weekly mon,wed,fri 09:30     # given weekdays at HH:MM
@@ -58,10 +61,16 @@ pomo remind rm <name>                                # remove one
 
 `pomo list` and `pomo rm <name>` are root-level shortcuts for the two above.
 
-Exactly one schedule is required (`--every` / `--daily` / `--weekly`).
+Exactly one schedule is required (`--at` / `--every` / `--daily` / `--weekly`).
 
 Notes:
 
+- **`--at WHEN`** fires once and then removes itself (LaunchAgent + metadata),
+  whichever dialog button is clicked. `WHEN` is `HH:MM` (today, or tomorrow if that
+  time has passed), `tomorrow HH:MM`, an explicit `YYYY-MM-DD HH:MM`, or a delay
+  from now (`30m`, `2h`). A time in the past is rejected. Under the hood the plist
+  pins Month + Day + Hour + Minute, and the job deletes itself when it fires, so it
+  never comes back a year later.
 - **`--every` floor**: launchd throttles relaunches to ~10s minimum, so very short
   intervals are smoothed to about 10 seconds.
 - **`--until DATE`** stops the reminder once now reaches that instant. A bare date

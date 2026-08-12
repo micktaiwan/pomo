@@ -35,6 +35,13 @@ cargo clippy             # lint
 - `-s 1|2|3` — display size: 1 = text, 2 = compact, 3 = large (default)
 - `-t`, `--title TEXT...` — title above the timer. Must be last option (consumes all remaining args).
 
+## Reminders
+
+`pomo remind` writes a launchd LaunchAgent per reminder. `--at WHEN` is the one-shot
+form (`HH:MM`, `tomorrow HH:MM`, `YYYY-MM-DD HH:MM`, or a delay like `2h`): the plist
+pins Month + Day + Hour + Minute and the fired job removes its own plist and metadata,
+so it never repeats. `--every` / `--daily` / `--weekly` are the recurring forms.
+
 ## Architecture
 
 Single `src/main.rs`. Key components:
@@ -45,3 +52,15 @@ Single `src/main.rs`. Key components:
 - Terminal title mirrors the countdown via OSC 0 (`osc_title`), saved/restored with XTWINOPS push/pop
 - Alternate screen + raw mode with `RawModeGuard` (Drop-based cleanup)
 - macOS notification via `osascript`
+
+## The `pomo` skill is this tool's public surface
+
+`~/.claude/skills/pomo/SKILL.md` — the real file is
+`~/projects/perso/dotfiles/claude/skills/pomo/SKILL.md`, the symlink is only how Claude Code sees
+it — is what tells a session anywhere on this Mac how to use pomo: the commands, the paths, the
+ports, what it must not do. Nothing keeps it in sync automatically.
+
+**A change here that alters what the skill promises must land in the skill in the same breath**:
+a command or a flag, a socket or data path, a port, a default value, a config file name, a rule
+about what a session may touch. Leaving it stale is worse than having no skill at all, because a
+session will act on what it says. `/skill-check pomo` compares the two and reports what drifted.
