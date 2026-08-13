@@ -287,6 +287,8 @@ fn parse_target_time(input: &str) -> Option<u64> {
 // ===== Scheduled reminders (launchd-backed, survive reboot) =====
 
 const LABEL_PREFIX: &str = "com.mick.pomo.";
+/// Name suffix of the one-shot created when a reminder is snoozed.
+const SNOOZE_SUFFIX: &str = "-snooze";
 
 /// A recurring schedule for a reminder.
 enum Schedule {
@@ -763,6 +765,27 @@ fn remind_cmd(args: &[String]) {
     }
 }
 
+/// How long the Snooze button pushes a reminder back.
+const SNOOZE_SECS: u64 = 10 * 60;
+/// Snooze button label. Spells out the delay so the dialog needs no explaining.
+const SNOOZE_BUTTON: &str = "Snooze 10m";
+
+/// Schedule a one-shot copy of a fired reminder SNOOZE_SECS from now, under its
+/// own `<name>-snooze` label. The original is untouched: a recurring reminder
+/// keeps its schedule, a one-shot still tears itself down after firing.
+fn snooze_reminder(label: &str, msg: &str) {
+    let name = label.strip_prefix(LABEL_PREFIX).unwrap_or(label);
+    // Snoozing a snooze reuses the same name instead of stacking suffixes.
+    let name = name.strip_suffix(SNOOZE_SUFFIX).unwrap_or(name);
+    let at = Local::now().naive_local() + ChronoDuration::seconds(SNOOZE_SECS as i64);
+    remind_create(
+        msg.to_string(),
+        Schedule::Once(at),
+        None,
+        format!("{name}{SNOOZE_SUFFIX}"),
+    );
+}
+
 /// Invoked by launchd. Show the reminder, or tear it down if --until has passed.
 fn fire_cmd(args: &[String]) {
     let mut label = String::new();
@@ -793,10 +816,16 @@ fn fire_cmd(args: &[String]) {
         unload_agent(&label);
         return;
     }
-    // Two-button dialog: OK just dismisses; Disable tears the reminder down so
-    // it never fires again (same teardown as `pomo remind rm`).
+    // Three-button dialog: OK just dismisses; Snooze re-fires the same message
+    // shortly after; Disable tears the reminder down so it never fires again
+    // (same teardown as `pomo remind rm`).
     // A one-shot tears itself down whichever button was clicked: it has fired.
-    if show_dialog("Reminder", &msg, &["Disable", "OK"], "OK") == "Disable" || once {
+    let choice = show_dialog("Reminder", &msg, &["Disable", SNOOZE_BUTTON, "OK"], "OK");
+    if choice == SNOOZE_BUTTON {
+        // Before any teardown below: unload_agent kills this very process.
+        snooze_reminder(&label, &msg);
+    }
+    if choice == "Disable" || once {
         // Remove our own files FIRST: unload_agent below boots out this very
         // launchd job and would otherwise kill us before the files are removed.
         fs::remove_file(plist_path(&label)).ok();
