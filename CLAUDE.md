@@ -42,9 +42,11 @@ form (`HH:MM`, `tomorrow HH:MM`, `YYYY-MM-DD HH:MM`, or a delay like `2h`): the 
 pins Month + Day + Hour + Minute and the fired job removes its own plist and metadata,
 so it never repeats. `--every` / `--daily` / `--weekly` are the recurring forms.
 
-The fired dialog has three buttons: `OK` dismisses, `Disable` tears the reminder down,
-`Snooze 10m` schedules a one-shot copy named `<name>-snooze` ten minutes later while
-leaving the original schedule untouched.
+The fired dialog of a recurring reminder has three buttons: `OK` dismisses, `Disable`
+tears the reminder down, `Snooze 10m` schedules a one-shot copy named `<name>-snooze`
+ten minutes later while leaving the original schedule untouched. A one-shot shows only
+`Snooze 10m` and `OK`: it tears itself down whichever button is clicked, so `Disable`
+would duplicate `OK`.
 
 ## Architecture
 

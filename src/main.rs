@@ -816,11 +816,16 @@ fn fire_cmd(args: &[String]) {
         unload_agent(&label);
         return;
     }
-    // Three-button dialog: OK just dismisses; Snooze re-fires the same message
-    // shortly after; Disable tears the reminder down so it never fires again
-    // (same teardown as `pomo remind rm`).
-    // A one-shot tears itself down whichever button was clicked: it has fired.
-    let choice = show_dialog("Reminder", &msg, &["Disable", SNOOZE_BUTTON, "OK"], "OK");
+    // OK just dismisses; Snooze re-fires the same message shortly after;
+    // Disable tears the reminder down so it never fires again (same teardown as
+    // `pomo remind rm`). A one-shot gets no Disable button: it tears itself down
+    // whichever button was clicked, so Disable would be a duplicate of OK.
+    let buttons: &[&str] = if once {
+        &[SNOOZE_BUTTON, "OK"]
+    } else {
+        &["Disable", SNOOZE_BUTTON, "OK"]
+    };
+    let choice = show_dialog("Reminder", &msg, buttons, "OK");
     if choice == SNOOZE_BUTTON {
         // Before any teardown below: unload_agent kills this very process.
         snooze_reminder(&label, &msg);
