@@ -50,6 +50,11 @@ ten minutes later while leaving the original schedule untouched. A one-shot show
 `Snooze 10m` and `OK`: it tears itself down whichever button is clicked, so `Disable`
 would duplicate `OK`.
 
+Snoozing a snooze alternates the suffix (`-snooze` → `-snooze-2` → `-snooze`). It has to:
+`load_agent` boots a label out before bootstrapping it, so re-scheduling under our own
+label kills the running job between the bootout and the bootstrap — the plist and metadata
+are already on disk, so the reminder shows up in `pomo list` but launchd never arms it.
+
 ## Architecture
 
 Single `src/main.rs`. Key components:

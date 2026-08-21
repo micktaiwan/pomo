@@ -289,6 +289,11 @@ fn parse_target_time(input: &str) -> Option<u64> {
 const LABEL_PREFIX: &str = "com.mick.pomo.";
 /// Name suffix of the one-shot created when a reminder is snoozed.
 const SNOOZE_SUFFIX: &str = "-snooze";
+/// The suffix a snooze switches to when it is itself snoozed. Re-snoozing must
+/// land on a *different* label than the job doing the snoozing: `load_agent`
+/// boots the label out before bootstrapping it, and booting out our own label
+/// kills this process mid-way, leaving a plist that launchd never armed.
+const SNOOZE_SUFFIX_ALT: &str = "-snooze-2";
 
 /// A recurring schedule for a reminder.
 enum Schedule {
@@ -792,20 +797,25 @@ const SNOOZE_SECS: u64 = 10 * 60;
 /// Snooze button label. Spells out the delay so the dialog needs no explaining.
 const SNOOZE_BUTTON: &str = "Snooze 10m";
 
+/// The name a snooze of `name` must take: the base name plus a snooze suffix
+/// that alternates, so snoozing a snooze never targets its own label.
+fn snooze_name(name: &str) -> String {
+    if let Some(base) = name.strip_suffix(SNOOZE_SUFFIX_ALT) {
+        format!("{base}{SNOOZE_SUFFIX}")
+    } else if let Some(base) = name.strip_suffix(SNOOZE_SUFFIX) {
+        format!("{base}{SNOOZE_SUFFIX_ALT}")
+    } else {
+        format!("{name}{SNOOZE_SUFFIX}")
+    }
+}
+
 /// Schedule a one-shot copy of a fired reminder SNOOZE_SECS from now, under its
 /// own `<name>-snooze` label. The original is untouched: a recurring reminder
 /// keeps its schedule, a one-shot still tears itself down after firing.
 fn snooze_reminder(label: &str, msg: &str) {
     let name = label.strip_prefix(LABEL_PREFIX).unwrap_or(label);
-    // Snoozing a snooze reuses the same name instead of stacking suffixes.
-    let name = name.strip_suffix(SNOOZE_SUFFIX).unwrap_or(name);
     let at = Local::now().naive_local() + ChronoDuration::seconds(SNOOZE_SECS as i64);
-    remind_create(
-        msg.to_string(),
-        Schedule::Once(at),
-        None,
-        format!("{name}{SNOOZE_SUFFIX}"),
-    );
+    remind_create(msg.to_string(), Schedule::Once(at), None, snooze_name(name));
 }
 
 /// Invoked by launchd. Show the reminder, or tear it down if --until has passed.
@@ -1095,6 +1105,15 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_snooze_name_alternates() {
+        // A snooze must never target the label of the job creating it: booting
+        // out our own label kills us before the new job is bootstrapped.
+        assert_eq!(snooze_name("pilulier"), "pilulier-snooze");
+        assert_eq!(snooze_name("pilulier-snooze"), "pilulier-snooze-2");
+        assert_eq!(snooze_name("pilulier-snooze-2"), "pilulier-snooze");
+    }
 
     #[test]
     fn test_parse_duration() {
