@@ -620,6 +620,27 @@ fn remind_rm(name: &str) {
     }
 }
 
+fn print_usage() {
+    println!("pomo — terminal timer, stopwatch and scheduled reminders.");
+    println!();
+    println!("Timer / stopwatch:");
+    println!("  pomo                            # stopwatch, counts up");
+    println!("  pomo 25m                        # countdown (d/h/m/s, e.g. 90s, 1h30m)");
+    println!("  pomo 14:30                      # countdown to a target time (HH:MM)");
+    println!("  pomo 25m -t standup             # title above the timer (must be last)");
+    println!("  pomo -s 1|2|3                   # display size: 1 text, 2 compact, 3 large (default)");
+    println!();
+    println!("Reminders (launchd):");
+    println!("  pomo remind \"message\" --at 09:00             # once: HH:MM, YYYY-MM-DD HH:MM, or a delay (2h)");
+    println!("  pomo remind \"message\" --every 30m            # interval: s/m/h/d");
+    println!("  pomo remind \"message\" --daily 09:00          # every day at HH:MM");
+    println!("  pomo remind \"message\" --weekly mon,wed 09:00 # given weekdays at HH:MM");
+    println!("  pomo remind ... --until 2026-07-15           # auto-removes afterwards");
+    println!("  pomo remind ... --name <slug>                # explicit name (default: from message)");
+    println!("  pomo list                                    # list scheduled reminders");
+    println!("  pomo rm <name>                               # remove one");
+}
+
 fn print_remind_usage() {
     eprintln!("Usage:");
     eprintln!("  pomo remind \"message\" --at 09:00             # once: HH:MM, YYYY-MM-DD HH:MM, or a delay (2h)");
@@ -752,6 +773,7 @@ fn remind_parse_create(args: &[String]) {
 
 fn remind_cmd(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
+        Some("-h") | Some("--help") | Some("help") => print_remind_usage(),
         None => {
             print_remind_usage();
             std::process::exit(1);
@@ -845,6 +867,10 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
+        Some("-h") | Some("--help") | Some("help") => {
+            print_usage();
+            return;
+        }
         Some("remind") => {
             remind_cmd(&args[2..]);
             return;

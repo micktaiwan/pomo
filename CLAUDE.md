@@ -15,6 +15,7 @@ cargo run                # stopwatch mode (counts up)
 cargo run -- 25m         # timer mode (countdown from duration)
 cargo run -- 14:30       # timer mode (countdown to target time)
 cargo run -- 25m -t foo  # timer with title
+cargo run -- --help      # usage (timer + reminders)
 cargo test               # run tests
 cargo clippy             # lint
 ```
@@ -34,6 +35,7 @@ cargo clippy             # lint
 
 - `-s 1|2|3` — display size: 1 = text, 2 = compact, 3 = large (default)
 - `-t`, `--title TEXT...` — title above the timer. Must be last option (consumes all remaining args).
+- `-h`, `--help` (or `pomo help`) — full usage, timer and reminders. `pomo remind --help` prints the reminder usage alone.
 
 ## Reminders
 
