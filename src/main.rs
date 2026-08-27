@@ -206,19 +206,64 @@ fn osc_title(s: &str) -> String {
 }
 
 fn notify(msg: &str) {
-    blocking_dialog("pomo", msg);
+    // A timer ending is a one-shot event, same as a `--at` reminder firing.
+    blocking_dialog("pomo", msg, ICON_ONCE);
+}
+
+/// Icon names, one per kind of dialog. Each maps to `<name>.icns` in the icons
+/// directory. An empty name is the escape hatch that keeps AppleScript's generic
+/// note icon, which is also what a missing file falls back to.
+const ICON_ONCE: &str = "once";
+const ICON_REPEAT: &str = "repeat";
+const ICON_ALERT: &str = "alert";
+
+/// Directory holding the dialog icons, first match wins: an explicit
+/// POMO_ICONS_DIR, an `icons/` folder sitting next to the installed binary,
+/// then the repo's own `assets/icons` (absolute path baked in at build time, so
+/// it resolves the same from a launchd job as from a shell). None is required —
+/// a missing directory falls back to the generic note icon.
+fn icons_dir() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = env::var("POMO_ICONS_DIR") {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Ok(exe) = env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        candidates.push(parent.join("icons"));
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons"));
+    candidates.into_iter().find(|p| p.is_dir())
+}
+
+/// The AppleScript `with icon …` clause for `name`, falling back to the generic
+/// note icon whenever the name is empty or its .icns is missing.
+fn icon_clause(name: &str) -> String {
+    if !name.is_empty()
+        && let Some(dir) = icons_dir()
+    {
+        let path = dir.join(format!("{name}.icns"));
+        if path.is_file() {
+            let escaped = path
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            return format!("with icon (POSIX file \"{escaped}\")");
+        }
+    }
+    "with icon note".to_string()
 }
 
 /// Ring the alert sound and show a modal dialog that stays frontmost until the
 /// user clicks OK. Blocks the calling process until dismissed.
-fn blocking_dialog(title: &str, msg: &str) {
-    show_dialog(title, msg, &["OK"], "OK");
+fn blocking_dialog(title: &str, msg: &str, icon: &str) {
+    show_dialog(title, msg, &["OK"], "OK", icon);
 }
 
 /// Ring the alert sound and show a modal dialog with the given buttons, staying
 /// frontmost until dismissed. Blocks the calling process and returns the label
 /// of the clicked button (empty string if osascript failed to run).
-fn show_dialog(title: &str, msg: &str, buttons: &[&str], default: &str) -> String {
+fn show_dialog(title: &str, msg: &str, buttons: &[&str], default: &str, icon: &str) -> String {
     // Play the alert sound (non-blocking) so it rings while the dialog is up.
     let _ = Command::new("afplay")
         .arg("/System/Library/Sounds/Glass.aiff")
@@ -240,11 +285,12 @@ fn show_dialog(title: &str, msg: &str, buttons: &[&str], default: &str) -> Strin
         .collect::<Vec<_>>()
         .join(", ");
     let script = format!(
-        "display dialog \"{}\" with title \"{}\" buttons {{{}}} default button \"{}\" with icon note",
+        "display dialog \"{}\" with title \"{}\" buttons {{{}}} default button \"{}\" {}",
         esc(msg),
         esc(title),
         button_list,
         esc(default),
+        icon_clause(icon),
     );
     let out = Command::new("osascript").args(["-e", &script]).output();
     // osascript prints `button returned:<label>` on stdout for the clicked button.
@@ -499,6 +545,11 @@ fn load_agent(plist: &Path, label: &str) {
 }
 
 fn unload_agent(label: &str) {
+    // An empty label would build `gui/<uid>/`, which targets the whole GUI
+    // domain instead of one job. Nothing to boot out, so bail out instead.
+    if label.is_empty() {
+        return;
+    }
     let uid = current_uid();
     let _ = Command::new("launchctl")
         .args(["bootout".to_string(), format!("gui/{uid}/{label}")])
@@ -644,6 +695,9 @@ fn print_usage() {
     println!("  pomo remind ... --name <slug>                # explicit name (default: from message)");
     println!("  pomo list                                    # list scheduled reminders");
     println!("  pomo rm <name>                               # remove one");
+    println!();
+    println!("Alert:");
+    println!("  pomo alert \"message\"                         # ring and show a blocking dialog now");
 }
 
 fn print_remind_usage() {
@@ -818,6 +872,21 @@ fn snooze_reminder(label: &str, msg: &str) {
     remind_create(msg.to_string(), Schedule::Once(at), None, snooze_name(name));
 }
 
+/// `pomo alert "message"` — ring and show the blocking dialog right now, with
+/// no timer and no launchd job behind it. The same dialog the timer and the
+/// reminders end on, reachable on its own for an alert that must be seen now.
+fn alert_cmd(args: &[String]) {
+    match args.first().map(|s| s.as_str()) {
+        Some("-h") | Some("--help") | Some("help") | None => {
+            eprintln!("Usage: pomo alert \"message\"   # ring and show a blocking dialog now");
+            std::process::exit(1);
+        }
+        _ => {}
+    }
+    // Join the remaining args so an unquoted message still works.
+    blocking_dialog("Alert", &args.join(" "), ICON_ALERT);
+}
+
 /// Invoked by launchd. Show the reminder, or tear it down if --until has passed.
 fn fire_cmd(args: &[String]) {
     let mut label = String::new();
@@ -857,7 +926,8 @@ fn fire_cmd(args: &[String]) {
     } else {
         &["Disable", SNOOZE_BUTTON, "OK"]
     };
-    let choice = show_dialog("Reminder", &msg, buttons, "OK");
+    let icon = if once { ICON_ONCE } else { ICON_REPEAT };
+    let choice = show_dialog("Reminder", &msg, buttons, "OK", icon);
     if choice == SNOOZE_BUTTON {
         // Before any teardown below: unload_agent kills this very process.
         snooze_reminder(&label, &msg);
@@ -887,6 +957,10 @@ fn main() {
         }
         Some("__fire") => {
             fire_cmd(&args[2..]);
+            return;
+        }
+        Some("alert") => {
+            alert_cmd(&args[2..]);
             return;
         }
         // Root-level shortcuts for reminders (list/rm are not valid durations).

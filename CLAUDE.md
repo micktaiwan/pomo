@@ -15,7 +15,8 @@ cargo run                # stopwatch mode (counts up)
 cargo run -- 25m         # timer mode (countdown from duration)
 cargo run -- 14:30       # timer mode (countdown to target time)
 cargo run -- 25m -t foo  # timer with title
-cargo run -- --help      # usage (timer + reminders)
+cargo run -- --help      # usage (timer + reminders + alert)
+cargo run -- alert "boom"  # blocking dialog right now
 cargo test               # run tests
 cargo clippy             # lint
 ```
@@ -54,6 +55,32 @@ Snoozing a snooze alternates the suffix (`-snooze` → `-snooze-2` → `-snooze`
 `load_agent` boots a label out before bootstrapping it, so re-scheduling under our own
 label kills the running job between the bootout and the bootstrap — the plist and metadata
 are already on disk, so the reminder shows up in `pomo list` but launchd never arms it.
+
+## `pomo alert`
+
+`pomo alert "message"` rings and shows the same blocking dialog straight away, with no
+countdown and no launchd job behind it. It exists because the dialog used to be reachable
+only through a timer or a reminder, so an alert that had to be seen *now* had to wait at
+least until the next minute (a one-shot plist pins `Minute`, so `--at 30s` cannot fire
+sooner). Single `OK` button; the command returns when it is clicked.
+
+## Dialog icons
+
+The three dialogs each carry their own icon, built from `tools/make-icons.py` into
+`assets/icons/`: `once.icns` (blue clock) for a one-shot reminder and for a timer running
+out — both are one-shot events — `repeat.icns` (green loop) for a recurring reminder, and
+`alert.icns` (red triangle) for `pomo alert`.
+
+`icons_dir()` takes the first directory that exists, in order: `POMO_ICONS_DIR`, an
+`icons/` folder next to the installed binary, then `assets/icons` in this repo — that last
+path is baked in at build time via `CARGO_MANIFEST_DIR`, so it is absolute and resolves
+the same from a launchd job as from a shell. A missing directory or a missing `.icns` is
+not an error: `icon_clause` falls back to `with icon note`, exactly what every dialog
+looked like before.
+
+Regenerate with `python3 tools/make-icons.py` (Pillow + `iconutil`). The script draws each
+icon at 1024px and lets `iconutil` build the `.icns`; the intermediate `.iconset`
+directories are removed on the way out.
 
 ## Architecture
 
