@@ -10,6 +10,7 @@ pomo 25m                      # classic 25 min pomodoro
 pomo 5m                       # 5 min break
 pomo 90s                      # 90 seconds
 pomo 1h30m                    # 1 hour 30
+pomo 1h30                     # same (trailing number takes the next smaller unit)
 pomo 2d                       # 2 days
 pomo 14:30                    # countdown to 14:30 (tomorrow if already passed)
 pomo 25m -t daily standup     # timer with title

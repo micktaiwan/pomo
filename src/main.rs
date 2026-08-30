@@ -93,24 +93,22 @@ fn parse_duration(input: &str) -> Option<u64> {
     let input = input.trim().to_lowercase();
     let mut total: u64 = 0;
     let mut current = String::new();
+    // Unit of the last suffix seen, so a trailing unitless number can fall
+    // through to the next smaller unit ("1h30" == "1h30m").
+    let mut last_unit: Option<char> = None;
 
     for c in input.chars() {
         match c {
-            'd' => {
-                total += current.parse::<u64>().ok()? * 86400;
+            'd' | 'h' | 'm' | 's' => {
+                let mult = match c {
+                    'd' => 86400,
+                    'h' => 3600,
+                    'm' => 60,
+                    _ => 1,
+                };
+                total += current.parse::<u64>().ok()? * mult;
                 current.clear();
-            }
-            'h' => {
-                total += current.parse::<u64>().ok()? * 3600;
-                current.clear();
-            }
-            'm' => {
-                total += current.parse::<u64>().ok()? * 60;
-                current.clear();
-            }
-            's' => {
-                total += current.parse::<u64>().ok()?;
-                current.clear();
+                last_unit = Some(c);
             }
             '0'..='9' => current.push(c),
             _ => return None,
@@ -118,7 +116,13 @@ fn parse_duration(input: &str) -> Option<u64> {
     }
 
     if !current.is_empty() {
-        return None;
+        let mult = match last_unit? {
+            'd' => 3600,
+            'h' => 60,
+            'm' => 1,
+            _ => return None,
+        };
+        total += current.parse::<u64>().ok()? * mult;
     }
 
     if total == 0 { None } else { Some(total) }
@@ -276,8 +280,7 @@ fn show_dialog(title: &str, msg: &str, buttons: &[&str], default: &str, icon: &s
         s.replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace("\r\n", "\" & return & \"")
-            .replace('\n', "\" & return & \"")
-            .replace('\r', "\" & return & \"")
+            .replace(['\n', '\r'], "\" & return & \"")
     };
     let button_list = buttons
         .iter()
@@ -681,7 +684,7 @@ fn print_usage() {
     println!();
     println!("Timer / stopwatch:");
     println!("  pomo                            # stopwatch, counts up");
-    println!("  pomo 25m                        # countdown (d/h/m/s, e.g. 90s, 1h30m)");
+    println!("  pomo 25m                        # countdown (d/h/m/s, e.g. 90s, 1h30m, 1h30)");
     println!("  pomo 14:30                      # countdown to a target time (HH:MM)");
     println!("  pomo 25m -t standup             # title above the timer (must be last)");
     println!("  pomo -s 1|2|3                   # display size: 1 text, 2 compact, 3 large (default)");
@@ -1198,6 +1201,11 @@ mod tests {
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration("0m"), None);
         assert_eq!(parse_duration("25"), None);
+        assert_eq!(parse_duration("1h30"), Some(5400));
+        assert_eq!(parse_duration("1m30"), Some(90));
+        assert_eq!(parse_duration("1d12"), Some(129600));
+        assert_eq!(parse_duration("2h30m10"), Some(9010));
+        assert_eq!(parse_duration("30s10"), None);
     }
 
     #[test]

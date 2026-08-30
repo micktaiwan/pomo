@@ -9,8 +9,9 @@ CLI pomodoro/timer/stopwatch for the terminal (macOS) written in Rust. Displays 
 ## Commands
 
 ```bash
+./bin/build.sh           # lint + test + release build + INSTALL (the only way to ship)
 cargo build              # dev build
-cargo build --release    # release build
+cargo build --release    # release build, NOT installed — see below
 cargo run                # stopwatch mode (counts up)
 cargo run -- 25m         # timer mode (countdown from duration)
 cargo run -- 14:30       # timer mode (countdown to target time)
@@ -21,6 +22,28 @@ cargo test               # run tests
 cargo clippy             # lint
 ```
 
+## Installing: always `./bin/build.sh`, never `cargo build` alone
+
+`/usr/local/bin/pomo` is a **real copy**, and `bin/build.sh` re-registers every
+`com.mick.pomo.*` LaunchAgent after installing it. Both exist because of the same trap.
+
+macOS pins a launch constraint on a LaunchAgent's executable when the plist is
+bootstrapped: Background Task Management records its code-signing identity then. A
+rebuild changes the binary's CDHash, so on the next fire AMFI kills the job before
+`main()` runs — `OS_REASON_CODESIGNING`, `Launch Constraint Violation` — and launchd
+disables the service. Nothing lands in `StandardErrorPath`: the reminder just never
+appears. On 2026-08-28 the 18:00 reminder died this way, and while `/usr/local/bin/pomo`
+was a symlink into the cargo target directory, a single `cargo build --release` armed
+that failure for all eight reminders at once, medication included.
+
+`bin/build.sh` therefore signs the binary explicitly (cargo's linker-signed output has
+no CMS blob, which is what AMFI objects to), installs a real copy with `ditto`, and
+bootouts/bootstraps each agent so BTM re-pins the identity of the binary now in place.
+It resolves the build output through `cargo metadata` rather than `./target`, because
+`CARGO_TARGET_DIR` points at `~/.cargo/target`.
+
+A plain `cargo build --release` is fine for iterating. It is never how a change ships.
+
 ## Modes
 
 - **No argument** (`pomo`): stopwatch, counts up from 00:00, no notification
@@ -30,6 +53,7 @@ cargo clippy             # lint
 ## Input Formats
 
 - **Duration**: `25m`, `90s`, `1h30m`, `2d` (days). Units: `d` (days), `h` (hours), `m` (minutes), `s` (seconds).
+  A trailing number with no unit takes the next smaller one, so `1h30` == `1h30m` and `1m30` == `1m30s`. A bare number with no unit at all (`25`) is still rejected.
 - **Target time**: `HH:MM` (24h format, e.g. `14:30`, `9:00`).
 
 ## Options
