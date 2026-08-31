@@ -89,8 +89,35 @@ fn decompose_secs(secs: u64) -> (u64, u64, u64, u64) {
     (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
 }
 
+/// Spelled-out unit names, rewritten to the single letter the parser reads.
+/// Longest first inside each family: rewriting "second" before "seconds" would
+/// leave a stray "s" behind and turn a valid duration into a parse error.
+const UNIT_WORDS: &[(&str, &str)] = &[
+    ("seconds", "s"),
+    ("second", "s"),
+    ("secs", "s"),
+    ("sec", "s"),
+    ("minutes", "m"),
+    ("minute", "m"),
+    ("mins", "m"),
+    ("min", "m"),
+    ("hours", "h"),
+    ("hour", "h"),
+    ("hrs", "h"),
+    ("hr", "h"),
+    ("days", "d"),
+    ("day", "d"),
+];
+
 fn parse_duration(input: &str) -> Option<u64> {
-    let input = input.trim().to_lowercase();
+    let mut input = input.trim().to_lowercase();
+    // "5min" is what a human types when they mean "5m"; both reach the same
+    // single-letter grammar below.
+    for (word, letter) in UNIT_WORDS {
+        if input.contains(word) {
+            input = input.replace(word, letter);
+        }
+    }
     let mut total: u64 = 0;
     let mut current = String::new();
     // Unit of the last suffix seen, so a trailing unitless number can fall
@@ -684,8 +711,9 @@ fn print_usage() {
     println!();
     println!("Timer / stopwatch:");
     println!("  pomo                            # stopwatch, counts up");
-    println!("  pomo 25m                        # countdown (d/h/m/s, e.g. 90s, 1h30m, 1h30)");
+    println!("  pomo 25m                        # countdown (d/h/m/s, e.g. 90s, 1h30m, 1h30, 5min)");
     println!("  pomo 14:30                      # countdown to a target time (HH:MM)");
+    println!("  pomo 25m -r                     # at zero, a Snooze button restarts the same countdown");
     println!("  pomo 25m -t standup             # title above the timer (must be last)");
     println!("  pomo -s 1|2|3                   # display size: 1 text, 2 compact, 3 large (default)");
     println!();
@@ -856,6 +884,14 @@ const SNOOZE_BUTTON: &str = "Snooze 10m";
 
 /// The name a snooze of `name` must take: the base name plus a snooze suffix
 /// that alternates, so snoozing a snooze never targets its own label.
+/// Label of the extra button a `-r` timer ends on. It carries the length of the
+/// next round, so the dialog answers "and then what?" without going back to the
+/// command line — and it reads like the reminders' own `Snooze 10m`, which is the
+/// same gesture on a different mechanism.
+fn repeat_button(secs: u64) -> String {
+    format!("Snooze {}", format_duration_human(secs))
+}
+
 fn snooze_name(name: &str) -> String {
     if let Some(base) = name.strip_suffix(SNOOZE_SUFFIX_ALT) {
         format!("{base}{SNOOZE_SUFFIX}")
@@ -984,6 +1020,7 @@ fn main() {
     // Parse options
     let mut title: Option<String> = None;
     let mut size = DisplaySize::Large;
+    let mut repeat = false;
     let mut remaining_args: Vec<String> = Vec::new();
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
@@ -1002,6 +1039,8 @@ fn main() {
                 eprintln!("-s requires a value (1, 2, 3)");
                 std::process::exit(1);
             }
+        } else if arg == "-r" || arg == "--repeat" {
+            repeat = true;
         } else if arg == "--title" || arg == "-t" {
             let title_words: Vec<String> = args_iter.by_ref().cloned().collect();
             if title_words.is_empty() {
@@ -1014,11 +1053,13 @@ fn main() {
         }
     }
 
+    let mut from_target = false;
     let mode = if remaining_args.is_empty() {
         Mode::Stopwatch
     } else if remaining_args.len() == 1 {
         if let Some(secs) = parse_target_time(&remaining_args[0]) {
             let label = format!("→ {} ({})", remaining_args[0], format_duration_human(secs));
+            from_target = true;
             Mode::Timer { secs, label }
         } else if let Some(secs) = parse_duration(&remaining_args[0]) {
             let label = format!("({})", format_duration_human(secs));
@@ -1033,6 +1074,18 @@ fn main() {
         std::process::exit(1);
     };
 
+    // -r only makes sense on a countdown of a fixed length: a stopwatch never
+    // ends, and a target time is a point in the day, not a duration to replay.
+    if repeat {
+        match mode {
+            Mode::Stopwatch => fail("-r needs a duration (e.g. pomo 20m -r)"),
+            Mode::Timer { .. } if from_target => {
+                fail("-r needs a duration, not a target time (e.g. pomo 20m -r)")
+            }
+            Mode::Timer { .. } => {}
+        }
+    }
+
     let mut stdout = stdout();
     terminal::enable_raw_mode().expect("raw mode");
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide).ok();
@@ -1040,130 +1093,169 @@ fn main() {
     execute!(stdout, Print("\x1b[22;0t")).ok();
     let guard = RawModeGuard;
 
-    let start = SystemTime::now();
-    let start_time = Local::now();
-    let mut adjust_secs: i64 = 0; // +/- adjustment in seconds
-    let mut pause_start: Option<std::time::Instant> = None;
-    let mut total_paused = Duration::ZERO;
     let (total_secs, timer_label) = match &mode {
         Mode::Timer { secs, label } => (*secs, label.clone()),
         Mode::Stopwatch => (0, String::new()),
     };
-    let mut last_title = String::new();
+    let snooze_button = repeat_button(total_secs);
 
-    loop {
-        let raw_elapsed = start.elapsed().unwrap_or_default();
-        let current_paused = pause_start.map_or(total_paused, |ps| total_paused + ps.elapsed());
-        let elapsed_secs = raw_elapsed.saturating_sub(current_paused).as_secs();
-        let (display_secs, info_line) = match mode {
-            Mode::Stopwatch => (
-                (elapsed_secs as i64 + adjust_secs).max(0) as u64,
-                start_time.format("Started at %H:%M").to_string(),
-            ),
-            Mode::Timer { .. } => {
-                let remaining = (total_secs as i64 + adjust_secs) - elapsed_secs as i64;
-                let end_time = start_time + chrono::Duration::seconds((total_secs as i64 + adjust_secs).max(0)) + chrono::Duration::from_std(current_paused).unwrap_or_default();
-                (
-                    remaining.max(0) as u64,
-                    format!("Started at {} — End at {} {timer_label}", start_time.format("%H:%M"), end_time.format("%H:%M")),
-                )
+    let session_start = SystemTime::now();
+    let session_start_time = Local::now();
+    let mut rounds: u32 = 1;
+
+    let (end_time, elapsed) = loop {
+        let mut finished = false;
+        let start = SystemTime::now();
+        let start_time = Local::now();
+        let mut adjust_secs: i64 = 0; // +/- adjustment in seconds
+        let mut pause_start: Option<std::time::Instant> = None;
+        let mut total_paused = Duration::ZERO;
+        let mut last_title = String::new();
+
+        loop {
+            let raw_elapsed = start.elapsed().unwrap_or_default();
+            let current_paused = pause_start.map_or(total_paused, |ps| total_paused + ps.elapsed());
+            let elapsed_secs = raw_elapsed.saturating_sub(current_paused).as_secs();
+            let (display_secs, info_line) = match mode {
+                Mode::Stopwatch => (
+                    (elapsed_secs as i64 + adjust_secs).max(0) as u64,
+                    start_time.format("Started at %H:%M").to_string(),
+                ),
+                Mode::Timer { .. } => {
+                    let remaining = (total_secs as i64 + adjust_secs) - elapsed_secs as i64;
+                    let end_time = start_time + chrono::Duration::seconds((total_secs as i64 + adjust_secs).max(0)) + chrono::Duration::from_std(current_paused).unwrap_or_default();
+                    (
+                        remaining.max(0) as u64,
+                        format!("Started at {} — End at {} {timer_label}", start_time.format("%H:%M"), end_time.format("%H:%M")),
+                    )
+                }
+            };
+
+            let (cols, rows) = terminal::size().unwrap_or((80, 24));
+            let time_str = format_time(display_secs);
+
+            // Mirror the timer into the terminal title (Kova pane title, tab title…).
+            let pane_title = match &title {
+                Some(t) => format!("{t} — {time_str}"),
+                None => format!("pomo {time_str}"),
+            };
+            if pane_title != last_title {
+                execute!(stdout, Print(osc_title(&pane_title))).ok();
+                last_title = pane_title;
             }
-        };
 
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        let time_str = format_time(display_secs);
+            let eff_size = fit_size(&time_str, cols, size);
+            let big = render_big(&time_str, cols, eff_size);
+            let digit_lines = eff_size.height() as u16;
+            let title_lines: u16 = if title.is_some() { 2 } else { 0 };
+            let total_lines = title_lines + digit_lines + 2; // digits + blank + label
+            let top = if rows > total_lines { (rows - total_lines) / 2 } else { 0 };
 
-        // Mirror the timer into the terminal title (Kova pane title, tab title…).
-        let pane_title = match &title {
-            Some(t) => format!("{t} — {time_str}"),
-            None => format!("pomo {time_str}"),
-        };
-        if pane_title != last_title {
-            execute!(stdout, Print(osc_title(&pane_title))).ok();
-            last_title = pane_title;
-        }
+            let title_display = if let Some(ref t) = title {
+                let pad = center_pad(cols as usize, t.len());
+                format!("{pad}{t}\r\n\r\n")
+            } else {
+                String::new()
+            };
 
-        let eff_size = fit_size(&time_str, cols, size);
-        let big = render_big(&time_str, cols, eff_size);
-        let digit_lines = eff_size.height() as u16;
-        let title_lines: u16 = if title.is_some() { 2 } else { 0 };
-        let total_lines = title_lines + digit_lines + 2; // digits + blank + label
-        let top = if rows > total_lines { (rows - total_lines) / 2 } else { 0 };
+            let paused = pause_start.is_some();
+            let pause_text = if paused { " ⏸ PAUSED" } else { "" };
+            let label_pad = center_pad(cols as usize, info_line.len() + pause_text.len());
 
-        let title_display = if let Some(ref t) = title {
-            let pad = center_pad(cols as usize, t.len());
-            format!("{pad}{t}\r\n\r\n")
-        } else {
-            String::new()
-        };
-
-        let paused = pause_start.is_some();
-        let pause_text = if paused { " ⏸ PAUSED" } else { "" };
-        let label_pad = center_pad(cols as usize, info_line.len() + pause_text.len());
-
-        execute!(
-            stdout,
-            terminal::Clear(ClearType::All),
-            cursor::MoveTo(0, top),
-            Print(&title_display),
-            Print(&big),
-            Print(format!("\r\n\r\n{label_pad}{info_line}")),
-        )
-        .ok();
-        if paused {
             execute!(
                 stdout,
-                SetForegroundColor(Color::Red),
-                Print(pause_text),
-                ResetColor,
+                terminal::Clear(ClearType::All),
+                cursor::MoveTo(0, top),
+                Print(&title_display),
+                Print(&big),
+                Print(format!("\r\n\r\n{label_pad}{info_line}")),
             )
             .ok();
-        }
+            if paused {
+                execute!(
+                    stdout,
+                    SetForegroundColor(Color::Red),
+                    Print(pause_text),
+                    ResetColor,
+                )
+                .ok();
+            }
 
-        if matches!(mode, Mode::Timer { .. }) && display_secs == 0 {
-            break;
-        }
+            if matches!(mode, Mode::Timer { .. }) && display_secs == 0 {
+                finished = true;
+                break;
+            }
 
-        if event::poll(Duration::from_millis(100)).unwrap_or(false)
-            && let Ok(Event::Key(key)) = event::read()
-        {
-            match key.code {
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                KeyCode::Esc | KeyCode::Char('q') => break,
-                KeyCode::Char(' ') | KeyCode::Char('p') => {
-                    if let Some(ps) = pause_start.take() {
-                        total_paused += ps.elapsed();
-                    } else {
-                        pause_start = Some(std::time::Instant::now());
+            if event::poll(Duration::from_millis(100)).unwrap_or(false)
+                && let Ok(Event::Key(key)) = event::read()
+            {
+                match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Esc | KeyCode::Char('q') => break,
+                    KeyCode::Char(' ') | KeyCode::Char('p') => {
+                        if let Some(ps) = pause_start.take() {
+                            total_paused += ps.elapsed();
+                        } else {
+                            pause_start = Some(std::time::Instant::now());
+                        }
                     }
+                    KeyCode::Char('+') | KeyCode::Char('=') => adjust_secs += 60,
+                    KeyCode::Char('-') => {
+                        let min_adjust = match mode {
+                            Mode::Stopwatch => -(elapsed_secs as i64),
+                            Mode::Timer { .. } => -(total_secs as i64),
+                        };
+                        adjust_secs = (adjust_secs - 60).max(min_adjust);
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('+') | KeyCode::Char('=') => adjust_secs += 60,
-                KeyCode::Char('-') => {
-                    let min_adjust = match mode {
-                        Mode::Stopwatch => -(elapsed_secs as i64),
-                        Mode::Timer { .. } => -(total_secs as i64),
-                    };
-                    adjust_secs = (adjust_secs - 60).max(min_adjust);
-                }
-                _ => {}
             }
         }
-    }
 
-    // Capture end time and duration before the blocking dialog: it stays open
-    // until the user clicks OK, which would otherwise inflate both.
-    let end_time = Local::now();
-    let elapsed = format_duration_human(start.elapsed().unwrap_or_default().as_secs());
+        // Capture end time and duration before the blocking dialog: it stays open
+        // until the user clicks OK, which would otherwise inflate both.
+        let end_time = Local::now();
+        let elapsed = format_duration_human(session_start.elapsed().unwrap_or_default().as_secs());
 
-    if matches!(mode, Mode::Timer { .. }) {
-        notify("Time's up!");
-    }
+        // Quitting with q / Esc / Ctrl-C abandons the timer: nothing to ring about.
+        if !finished {
+            break (end_time, elapsed);
+        }
+
+        // A titled timer says what it was for: the title is the whole point of
+        // setting one, and "Time's up!" tells nothing when several are running.
+        let msg = title.as_deref().unwrap_or("Time's up!");
+
+        if repeat {
+            // -r turns the end-of-timer dialog into the loop's own control: the
+            // snooze button restarts the same countdown, OK ends the session.
+            // Nothing ever restarts on its own — a round begins on a click.
+            let choice = show_dialog(
+                "pomo",
+                msg,
+                &[snooze_button.as_str(), "OK"],
+                &snooze_button,
+                ICON_REPEAT,
+            );
+            if choice == snooze_button {
+                rounds += 1;
+                continue;
+            }
+            break (end_time, elapsed);
+        }
+
+        notify(msg);
+        break (end_time, elapsed);
+    };
 
     drop(guard);
     println!();
-    println!("  Started:  {}", start_time.format("%Y-%m-%d %H:%M:%S"));
+    println!("  Started:  {}", session_start_time.format("%Y-%m-%d %H:%M:%S"));
     println!("  Duration: {}", elapsed);
     println!("  Ended:    {}", end_time.format("%Y-%m-%d %H:%M:%S"));
+    if repeat {
+        println!("  Rounds:   {}", rounds);
+    }
     println!();
 }
 
@@ -1182,6 +1274,13 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_repeat_button_carries_the_round_length() {
+        assert_eq!(repeat_button(20 * 60), "Snooze 20m");
+        assert_eq!(repeat_button(90), "Snooze 1m30s");
+        assert_eq!(repeat_button(3600), "Snooze 1h");
+    }
 
     #[test]
     fn test_snooze_name_alternates() {
@@ -1206,6 +1305,22 @@ mod tests {
         assert_eq!(parse_duration("1d12"), Some(129600));
         assert_eq!(parse_duration("2h30m10"), Some(9010));
         assert_eq!(parse_duration("30s10"), None);
+        // Spelled-out units, singular and plural.
+        assert_eq!(parse_duration("5min"), Some(300));
+        assert_eq!(parse_duration("5mins"), Some(300));
+        assert_eq!(parse_duration("5minutes"), Some(300));
+        assert_eq!(parse_duration("5minute"), Some(300));
+        assert_eq!(parse_duration("90sec"), Some(90));
+        assert_eq!(parse_duration("90secs"), Some(90));
+        assert_eq!(parse_duration("90seconds"), Some(90));
+        assert_eq!(parse_duration("2hours"), Some(7200));
+        assert_eq!(parse_duration("2hr"), Some(7200));
+        assert_eq!(parse_duration("2days"), Some(172800));
+        assert_eq!(parse_duration("1hour30min"), Some(5400));
+        assert_eq!(parse_duration("1h30min"), Some(5400));
+        // A spelled-out unit still lets a trailing unitless number fall through.
+        assert_eq!(parse_duration("1hour30"), Some(5400));
+        assert_eq!(parse_duration("minutes"), None);
     }
 
     #[test]

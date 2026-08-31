@@ -54,13 +54,35 @@ A plain `cargo build --release` is fine for iterating. It is never how a change 
 
 - **Duration**: `25m`, `90s`, `1h30m`, `2d` (days). Units: `d` (days), `h` (hours), `m` (minutes), `s` (seconds).
   A trailing number with no unit takes the next smaller one, so `1h30` == `1h30m` and `1m30` == `1m30s`. A bare number with no unit at all (`25`) is still rejected.
+  Spelled-out units work too — `5min`, `5mins`, `5minutes`, `90sec`, `2hours`, `2days` — because that is what a hand types under pressure. `UNIT_WORDS` rewrites them to the single letter before parsing, longest form first: rewriting `second` before `seconds` would leave a stray `s` and reject a valid duration.
 - **Target time**: `HH:MM` (24h format, e.g. `14:30`, `9:00`).
 
 ## Options
 
 - `-s 1|2|3` — display size: 1 = text, 2 = compact, 3 = large (default)
+- `-r`, `--repeat` — repeating timer, see below.
 - `-t`, `--title TEXT...` — title above the timer. Must be last option (consumes all remaining args).
 - `-h`, `--help` (or `pomo help`) — full usage, timer and reminders. `pomo remind --help` prints the reminder usage alone.
+
+## `-r`: the repeating timer
+
+`pomo 20m -r -t levo pharma` runs the same countdown, then ends on a dialog with two
+buttons instead of one: `Snooze 20m` (default) restarts an identical round, `OK` ends the
+session. The delay in the label is the timer's own length, not the reminders' fixed ten
+minutes. Rounds are never chained automatically — the loop only advances on a click,
+which is the whole point: the timer waits for you, it does not run behind your back.
+
+It is *not* an alias for `pomo remind --every 20m`. This one is a foreground process
+drawing the countdown and it dies with its terminal; a reminder is a launchd job that
+fires with no terminal at all. Both exist on purpose.
+
+`-r` requires a duration: a stopwatch never ends, and a target time (`14:30`) is a point
+in the day rather than a length to replay. Both are rejected at parse time.
+
+The rewrite that made this possible also split "the countdown reached zero" from "the
+user pressed q": quitting a timer early used to ring the dialog anyway, because the loop
+had a single exit. It now leaves silently.
+
 
 ## Reminders
 

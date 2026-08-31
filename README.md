@@ -12,6 +12,7 @@ pomo 90s                      # 90 seconds
 pomo 1h30m                    # 1 hour 30
 pomo 1h30                     # same (trailing number takes the next smaller unit)
 pomo 2d                       # 2 days
+pomo 5min                     # spelled-out units too (min/mins/minutes, sec, hour, day)
 pomo 14:30                    # countdown to 14:30 (tomorrow if already passed)
 pomo 25m -t daily standup     # timer with title
 pomo -s 2 25m                 # compact display size
@@ -20,6 +21,7 @@ pomo -s 2 25m                 # compact display size
 ### Options
 
 - `-s 1|2|3` — display size: 1 = text, 2 = compact, 3 = large (default)
+- `-r`, `--repeat` — the end-of-timer dialog gets a second button, `Snooze <duration>`, which restarts the same countdown. Rounds never chain on their own: one click, one round. Needs a duration (not a target time, not the stopwatch).
 - `-t`, `--title TEXT...` — title displayed above the timer. Must be last option (all remaining args are the title).
 
 ### Terminal title
