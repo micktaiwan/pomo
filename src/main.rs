@@ -267,6 +267,16 @@ fn icons_dir() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_dir())
 }
 
+/// The `.icns` file for `name`, when the icons directory holds one. `None`
+/// leaves each dialog on its own generic fallback.
+fn icon_file(name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let path = icons_dir()?.join(format!("{name}.icns"));
+    path.is_file().then_some(path)
+}
+
 /// The AppleScript `with icon …` clause for `name`, falling back to the generic
 /// note icon whenever the name is empty or its .icns is missing.
 fn icon_clause(name: &str) -> String {
@@ -334,6 +344,71 @@ fn show_dialog(title: &str, msg: &str, buttons: &[&str], default: &str, icon: &s
             .to_string()
     })
     .unwrap_or_default()
+}
+
+/// Ring and show a modal alert carrying a pop-up menu, and return the clicked
+/// button plus the menu item selected when it was clicked.
+///
+/// `display dialog` has no menu of any kind and caps out at three buttons, so
+/// this one is an AppKit `NSAlert` driven through JXA: the durations live in a
+/// pop-up button hung under the message, which leaves the button row free for
+/// Snooze / Disable / OK. Values travel through the environment rather than
+/// being spliced into the script, so a quote or a newline in the message can't
+/// break it. First button added is the default one (Return).
+fn show_menu_dialog(
+    title: &str,
+    msg: &str,
+    buttons: &[&str],
+    items: &[&str],
+    icon: &str,
+) -> (String, String) {
+    let _ = Command::new("afplay")
+        .arg("/System/Library/Sounds/Glass.aiff")
+        .spawn();
+    const SCRIPT: &str = r#"
+ObjC.import('Cocoa');
+var env = $.NSProcessInfo.processInfo.environment;
+function val(k) { var v = env.objectForKey(k); return v.isNil() ? '' : ObjC.unwrap(v); }
+var app = $.NSApplication.sharedApplication;
+app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+var alert = $.NSAlert.alloc.init;
+alert.messageText = val('POMO_TITLE');
+alert.informativeText = val('POMO_MSG');
+var iconPath = val('POMO_ICON');
+if (iconPath) {
+  var img = $.NSImage.alloc.initWithContentsOfFile(iconPath);
+  if (!img.isNil()) { alert.icon = img; }
+}
+var buttons = val('POMO_BUTTONS').split('\n');
+buttons.forEach(function (b) { alert.addButtonWithTitle(b); });
+var popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, 0, 140, 26), false);
+val('POMO_ITEMS').split('\n').forEach(function (i) { popup.addItemWithTitle(i); });
+popup.selectItemAtIndex(0);
+alert.accessoryView = popup;
+alert.window.setLevel($.NSStatusWindowLevel);
+app.activateIgnoringOtherApps(true);
+var clicked = buttons[alert.runModal - 1000] || '';
+clicked + '\t' + ObjC.unwrap(popup.titleOfSelectedItem);
+"#;
+    let mut cmd = Command::new("osascript");
+    cmd.args(["-l", "JavaScript", "-e", SCRIPT])
+        .env("POMO_TITLE", title)
+        .env("POMO_MSG", msg)
+        .env("POMO_BUTTONS", buttons.join("\n"))
+        .env("POMO_ITEMS", items.join("\n"));
+    if let Some(path) = icon_file(icon) {
+        cmd.env("POMO_ICON", path);
+    }
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return (String::new(), String::new()),
+    };
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut parts = line.splitn(2, '\t');
+    (
+        parts.next().unwrap_or("").to_string(),
+        parts.next().unwrap_or("").to_string(),
+    )
 }
 
 fn parse_target_time(input: &str) -> Option<u64> {
@@ -877,10 +952,18 @@ fn remind_cmd(args: &[String]) {
     }
 }
 
-/// How long the Snooze button pushes a reminder back.
-const SNOOZE_SECS: u64 = 10 * 60;
-/// Snooze button label. Spells out the delay so the dialog needs no explaining.
-const SNOOZE_BUTTON: &str = "Snooze 10m";
+/// Snooze button label. The delay itself is picked in the pop-up menu next to
+/// it, so the button only names the gesture.
+const SNOOZE_BUTTON: &str = "Snooze";
+/// The delays the pop-up menu offers, first one preselected: a reminder is
+/// snoozed ten minutes far more often than anything else, so 10m stays the
+/// one-click answer and the rest are one menu away.
+const SNOOZE_CHOICES: &[(&str, u64)] = &[
+    ("10 min", 10 * 60),
+    ("30 min", 30 * 60),
+    ("1 hour", 60 * 60),
+    ("2 hours", 2 * 60 * 60),
+];
 
 /// The name a snooze of `name` must take: the base name plus a snooze suffix
 /// that alternates, so snoozing a snooze never targets its own label.
@@ -902,12 +985,12 @@ fn snooze_name(name: &str) -> String {
     }
 }
 
-/// Schedule a one-shot copy of a fired reminder SNOOZE_SECS from now, under its
+/// Schedule a one-shot copy of a fired reminder `secs` from now, under its
 /// own `<name>-snooze` label. The original is untouched: a recurring reminder
 /// keeps its schedule, a one-shot still tears itself down after firing.
-fn snooze_reminder(label: &str, msg: &str) {
+fn snooze_reminder(label: &str, msg: &str, secs: u64) {
     let name = label.strip_prefix(LABEL_PREFIX).unwrap_or(label);
-    let at = Local::now().naive_local() + ChronoDuration::seconds(SNOOZE_SECS as i64);
+    let at = Local::now().naive_local() + ChronoDuration::seconds(secs as i64);
     remind_create(msg.to_string(), Schedule::Once(at), None, snooze_name(name));
 }
 
@@ -956,20 +1039,31 @@ fn fire_cmd(args: &[String]) {
         unload_agent(&label);
         return;
     }
-    // OK just dismisses; Snooze re-fires the same message shortly after;
-    // Disable tears the reminder down so it never fires again (same teardown as
-    // `pomo remind rm`). A one-shot gets no Disable button: it tears itself down
-    // whichever button was clicked, so Disable would be a duplicate of OK.
+    // Snooze re-fires the same message after the delay picked in the menu;
+    // OK just dismisses; Disable tears the reminder down so it never fires again
+    // (same teardown as `pomo remind rm`). A one-shot gets no Disable button: it
+    // tears itself down whichever button was clicked, so Disable would be a
+    // duplicate of OK.
+    // OK goes first: `show_menu_dialog` makes the first button the default one,
+    // and Return must keep dismissing the reminder, not snooze it.
     let buttons: &[&str] = if once {
-        &[SNOOZE_BUTTON, "OK"]
+        &["OK", SNOOZE_BUTTON]
     } else {
-        &["Disable", SNOOZE_BUTTON, "OK"]
+        &["OK", SNOOZE_BUTTON, "Disable"]
     };
+    let items: Vec<&str> = SNOOZE_CHOICES.iter().map(|(label, _)| *label).collect();
     let icon = if once { ICON_ONCE } else { ICON_REPEAT };
-    let choice = show_dialog("Reminder", &msg, buttons, "OK", icon);
+    let (choice, delay) = show_menu_dialog("Reminder", &msg, buttons, &items, icon);
     if choice == SNOOZE_BUTTON {
-        // Before any teardown below: unload_agent kills this very process.
-        snooze_reminder(&label, &msg);
+        // Before any teardown below: unload_agent kills this very process. An
+        // unknown menu label can only mean the dialog failed to run, so fall
+        // back to the preselected delay rather than dropping the snooze.
+        let secs = SNOOZE_CHOICES
+            .iter()
+            .find(|(label, _)| *label == delay)
+            .map(|(_, secs)| *secs)
+            .unwrap_or(SNOOZE_CHOICES[0].1);
+        snooze_reminder(&label, &msg, secs);
     }
     if choice == "Disable" || once {
         // Remove our own files FIRST: unload_agent below boots out this very

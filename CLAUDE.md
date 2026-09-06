@@ -91,11 +91,19 @@ form (`HH:MM`, `tomorrow HH:MM`, `YYYY-MM-DD HH:MM`, or a delay like `2h`): the 
 pins Month + Day + Hour + Minute and the fired job removes its own plist and metadata,
 so it never repeats. `--every` / `--daily` / `--weekly` are the recurring forms.
 
-The fired dialog of a recurring reminder has three buttons: `OK` dismisses, `Disable`
-tears the reminder down, `Snooze 10m` schedules a one-shot copy named `<name>-snooze`
-ten minutes later while leaving the original schedule untouched. A one-shot shows only
-`Snooze 10m` and `OK`: it tears itself down whichever button is clicked, so `Disable`
-would duplicate `OK`.
+The fired dialog of a recurring reminder has three buttons — `OK` dismisses (the
+default, so Return dismisses), `Snooze` schedules a one-shot copy named
+`<name>-snooze` while leaving the original schedule untouched, `Disable` tears the
+reminder down — plus a pop-up menu holding the snooze delay: 10 min (preselected),
+30 min, 1 hour, 2 hours. A one-shot shows only `OK` and `Snooze`: it tears itself
+down whichever button is clicked, so `Disable` would duplicate `OK`.
+
+That dialog is the one place `display dialog` is not used: it has no menu of any
+kind and caps out at three buttons. `show_menu_dialog` runs an AppKit `NSAlert`
+through JXA instead (`osascript -l JavaScript`), with the durations in an
+`NSPopUpButton` accessory view. Values reach the script through the environment,
+never spliced into its source, so a quote or a newline in a reminder message can't
+break it. It answers `<button>\t<menu item>` on stdout.
 
 Snoozing a snooze alternates the suffix (`-snooze` → `-snooze-2` → `-snooze`). It has to:
 `load_agent` boots a label out before bootstrapping it, so re-scheduling under our own
