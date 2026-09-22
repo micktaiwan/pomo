@@ -110,6 +110,23 @@ Snoozing a snooze alternates the suffix (`-snooze` → `-snooze-2` → `-snooze`
 label kills the running job between the bootout and the bootstrap — the plist and metadata
 are already on disk, so the reminder shows up in `pomo list` but launchd never arms it.
 
+## L'archive des rappels
+
+Un rappel ne disparaît plus sans laisser de trace. Les quatre chemins de suppression —
+un one-shot qui a sonné, un clic `Disable`, `pomo remind rm`, une date `--until`
+dépassée — passent par `archive_meta`, qui déplace la meta dans
+`~/.pomo/archive/<YYYYmmdd-HHMMSS>-<name>.meta` en lui ajoutant `archived_at=` et
+`reason=fired|disabled|removed|expired`. Le plist launchd, lui, est bien supprimé :
+l'archive garde la trace de ce qu'était le rappel, pas le rappel lui-même.
+
+`pomo list --archived` (ou `pomo remind list --archived`) les liste du plus récent au
+plus ancien — le nom de fichier commence par l'horodatage, donc un tri inverse suffit.
+`pomo list` termine par un compteur quand l'archive n'est pas vide.
+
+`purge_archive()` tourne au tout début de `main`, à chaque lancement de `pomo` quel
+qu'il soit, et supprime ce qui a plus de `ARCHIVE_KEEP_DAYS` (30) jours. L'âge se lit
+sur le mtime du fichier : il est écrit une fois et jamais retouché.
+
 ## `pomo alert`
 
 `pomo alert "message"` rings and shows the same blocking dialog straight away, with no

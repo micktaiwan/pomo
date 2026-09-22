@@ -616,6 +616,64 @@ fn plist_path(label: &str) -> PathBuf {
 fn meta_path(name: &str) -> PathBuf {
     meta_dir().join(format!("{name}.meta"))
 }
+fn archive_dir() -> PathBuf {
+    home().join(".pomo/archive")
+}
+
+/// Days an archived reminder is kept before any `pomo` run sweeps it away.
+const ARCHIVE_KEEP_DAYS: u64 = 30;
+
+/// A reminder that goes away — a one-shot that fired, a `rm`, a `--until`
+/// deadline, a `Disable` click — leaves its meta in `~/.pomo/archive` instead
+/// of vanishing. Clicking OK on a one-shot used to be the one irreversible
+/// gesture in the whole tool: the plist and the meta went, and nothing said
+/// what the reminder had been.
+fn archive_meta(name: &str, reason: &str) {
+    let src = meta_path(name);
+    let Ok(mut content) = fs::read_to_string(&src) else {
+        fs::remove_file(&src).ok();
+        return;
+    };
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    let now = Local::now();
+    fs::create_dir_all(archive_dir()).ok();
+    let dest = archive_dir().join(format!("{}-{name}.meta", now.format("%Y%m%d-%H%M%S")));
+    let archived = format!(
+        "{content}archived_at={}\nreason={reason}\n",
+        now.format("%Y-%m-%d %H:%M:%S")
+    );
+    if fs::write(&dest, archived).is_ok() {
+        fs::remove_file(&src).ok();
+    }
+}
+
+/// Sweep the archive on every run: anything written more than
+/// `ARCHIVE_KEEP_DAYS` days ago goes. The file's mtime is its archival time —
+/// it is written once and never touched again.
+fn purge_archive() {
+    let Some(cutoff) = SystemTime::now().checked_sub(Duration::from_secs(ARCHIVE_KEEP_DAYS * 86_400))
+    else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(archive_dir()) else {
+        return;
+    };
+    for p in entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "meta").unwrap_or(false))
+    {
+        let stale = fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .map(|t| t < cutoff)
+            .unwrap_or(false);
+        if stale {
+            fs::remove_file(&p).ok();
+        }
+    }
+}
 
 fn current_uid() -> String {
     Command::new("id")
@@ -764,6 +822,57 @@ fn remind_list() {
     if !found {
         println!("No reminders scheduled.");
     }
+    let archived = archive_entries().len();
+    if archived > 0 {
+        println!();
+        println!("{archived} archived (last {ARCHIVE_KEEP_DAYS} days)  ·  pomo list --archived");
+    }
+}
+
+/// Archived metas, newest first. The file name starts with the archival
+/// timestamp, so a reverse sort is chronological.
+fn archive_entries() -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(archive_dir()) else {
+        return Vec::new();
+    };
+    let mut metas: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "meta").unwrap_or(false))
+        .collect();
+    metas.sort();
+    metas.reverse();
+    metas
+}
+
+fn archive_list() {
+    let metas = archive_entries();
+    if metas.is_empty() {
+        println!("No archived reminders.");
+        return;
+    }
+    for p in metas {
+        let Ok(content) = fs::read_to_string(&p) else {
+            continue;
+        };
+        let get = |k: &str| -> String {
+            content
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{k}=")))
+                .unwrap_or("")
+                .to_string()
+        };
+        println!("• {}", get("name"));
+        println!(
+            "    {}  ·  {}  ·  {}",
+            get("archived_at"),
+            get("reason"),
+            get("schedule")
+        );
+        println!("    \"{}\"", get("msg"));
+    }
+    println!();
+    println!("Kept {ARCHIVE_KEEP_DAYS} days, then purged on the next pomo run.");
 }
 
 fn remind_rm(name: &str) {
@@ -772,7 +881,7 @@ fn remind_rm(name: &str) {
     let pp = plist_path(&label);
     let existed = pp.exists();
     fs::remove_file(&pp).ok();
-    fs::remove_file(meta_path(name)).ok();
+    archive_meta(name, "removed");
     if existed {
         println!("Removed reminder '{name}'.");
     } else {
@@ -800,6 +909,7 @@ fn print_usage() {
     println!("  pomo remind ... --until 2026-07-15           # auto-removes afterwards");
     println!("  pomo remind ... --name <slug>                # explicit name (default: from message)");
     println!("  pomo list                                    # list scheduled reminders");
+    println!("  pomo list --archived                         # reminders gone by (kept 30 days)");
     println!("  pomo rm <name>                               # remove one");
     println!();
     println!("Alert:");
@@ -815,6 +925,7 @@ fn print_remind_usage() {
     eprintln!("  pomo remind ... --until 2026-07-15           # auto-removes afterwards");
     eprintln!("  pomo remind ... --name <slug>                # explicit name (default: from message)");
     eprintln!("  pomo remind list");
+    eprintln!("  pomo remind list --archived");
     eprintln!("  pomo remind rm <name>");
 }
 
@@ -943,7 +1054,13 @@ fn remind_cmd(args: &[String]) {
             print_remind_usage();
             std::process::exit(1);
         }
-        Some("list") => remind_list(),
+        Some("list") => {
+            if args.get(1).map(|s| s.as_str()) == Some("--archived") {
+                archive_list();
+            } else {
+                remind_list();
+            }
+        }
         Some("rm") | Some("remove") => match args.get(1) {
             Some(n) => remind_rm(n),
             None => fail("Usage: pomo remind rm <name>"),
@@ -1034,7 +1151,7 @@ fn fire_cmd(args: &[String]) {
         // otherwise kill us before the files are removed.
         fs::remove_file(plist_path(&label)).ok();
         if let Some(name) = label.strip_prefix(LABEL_PREFIX) {
-            fs::remove_file(meta_path(name)).ok();
+            archive_meta(name, "expired");
         }
         unload_agent(&label);
         return;
@@ -1070,7 +1187,7 @@ fn fire_cmd(args: &[String]) {
         // launchd job and would otherwise kill us before the files are removed.
         fs::remove_file(plist_path(&label)).ok();
         if let Some(name) = label.strip_prefix(LABEL_PREFIX) {
-            fs::remove_file(meta_path(name)).ok();
+            archive_meta(name, if choice == "Disable" { "disabled" } else { "fired" });
         }
         unload_agent(&label);
     }
@@ -1078,6 +1195,9 @@ fn fire_cmd(args: &[String]) {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    // Every run sweeps the archive of anything older than ARCHIVE_KEEP_DAYS.
+    purge_archive();
 
     match args.get(1).map(|s| s.as_str()) {
         Some("-h") | Some("--help") | Some("help") => {
@@ -1098,7 +1218,11 @@ fn main() {
         }
         // Root-level shortcuts for reminders (list/rm are not valid durations).
         Some("list") => {
-            remind_list();
+            if args.get(2).map(|s| s.as_str()) == Some("--archived") {
+                archive_list();
+            } else {
+                remind_list();
+            }
             return;
         }
         Some("rm") | Some("remove") => {
