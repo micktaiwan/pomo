@@ -53,7 +53,9 @@ ditto "$BIN" "$DEST"
 # next fire, exactly as described above.
 shopt -s nullglob
 agents=("$HOME/Library/LaunchAgents/com.mick.pomo."*.plist)
-for plist in "${agents[@]}"; do
+# ${agents[@]+...}: bash 3.2 (macOS) treats an empty array as unset under `set -u`,
+# so a plain "${agents[@]}" aborts the script when no reminder is scheduled.
+for plist in ${agents[@]+"${agents[@]}"}; do
     label=$(basename "$plist" .plist)
     launchctl bootout "gui/$UID_N/$label" 2>/dev/null || true
     launchctl bootstrap "gui/$UID_N" "$plist"
@@ -63,4 +65,4 @@ done
 echo
 codesign -v "$DEST"
 echo "installed $DEST, signature verified"
-echo "${#agents[@]} reminder(s) re-registered"
+echo "${#agents[@]:-0} reminder(s) re-registered"
