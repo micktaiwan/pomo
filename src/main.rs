@@ -478,7 +478,8 @@ impl Schedule {
                 format!("    <key>StartCalendarInterval</key>\n    <array>\n{items}    </array>")
             }
             // Month + Day pins the single date; the job deletes itself once
-            // fired, so it never comes back a year later.
+            // fired. A minute missed while the Mac is off is caught at the next
+            // login by RunAtLoad (see `remind_create`), not a year later.
             Schedule::Once(at) => format!(
                 "    <key>StartCalendarInterval</key>\n    <dict>\n        <key>Month</key><integer>{}</integer>\n        <key>Day</key><integer>{}</integer>\n        <key>Hour</key><integer>{}</integer>\n        <key>Minute</key><integer>{}</integer>\n    </dict>",
                 at.month(),
@@ -623,6 +624,9 @@ fn archive_dir() -> PathBuf {
 /// Days an archived reminder is kept before any `pomo` run sweeps it away.
 const ARCHIVE_KEEP_DAYS: u64 = 30;
 
+/// Format of the `--at` argument a one-shot job carries.
+const ONCE_AT_FMT: &str = "%Y-%m-%d %H:%M";
+
 /// A reminder that goes away — a one-shot that fired, a `rm`, a `--until`
 /// deadline, a `Disable` click — leaves its meta in `~/.pomo/archive` instead
 /// of vanishing. Clicking OK on a one-shot used to be the one irreversible
@@ -737,9 +741,14 @@ fn remind_create(msg: String, sched: Schedule, until: Option<String>, name: Stri
         prog.push("--until".to_string());
         prog.push(u.clone());
     }
-    if matches!(sched, Schedule::Once(_)) {
+    if let Schedule::Once(at) = &sched {
         // Tells the fired job to tear itself down: a one-shot never repeats.
         prog.push("--once".to_string());
+        // The due time travels with the job so a RunAtLoad launch can tell an
+        // early load (skip) from a missed fire (show it now). Minute precision,
+        // like StartCalendarInterval: a snooze due at 18:02:37 fires at 18:02:00.
+        prog.push("--at".to_string());
+        prog.push(at.format(ONCE_AT_FMT).to_string());
     }
     let prog_xml: String = prog
         .iter()
@@ -757,13 +766,19 @@ fn remind_create(msg: String, sched: Schedule, until: Option<String>, name: Stri
 {prog_xml}    </array>
 {sched_xml}
     <key>RunAtLoad</key>
-    <false/>
+    <{run_at_load}/>
     <key>StandardErrorPath</key>
     <string>/tmp/{label}.err</string>
 </dict>
 </plist>
 "#,
-        sched_xml = sched.xml()
+        sched_xml = sched.xml(),
+        // A calendar job whose minute passes while the Mac is powered off never
+        // fires, and with Month/Day and no year it would come back a year later.
+        // On 2026-10-04 two snoozes due at 18:02 and 18:04 died in the reboot of
+        // a macOS upgrade. RunAtLoad makes launchd start a one-shot at every
+        // login, and `fire_cmd` shows it only once its time has come.
+        run_at_load = if matches!(sched, Schedule::Once(_)) { "true" } else { "false" },
     );
     fs::create_dir_all(agents_dir()).ok();
     fs::create_dir_all(meta_dir()).ok();
@@ -1126,12 +1141,19 @@ fn alert_cmd(args: &[String]) {
     blocking_dialog("Alert", &args.join(" "), ICON_ALERT);
 }
 
+/// A one-shot launched before its due minute is an early RunAtLoad start, not a
+/// fire. Without a due time (jobs written before `--at` existed), always fire.
+fn is_early_load(due: Option<NaiveDateTime>, now: NaiveDateTime) -> bool {
+    due.is_some_and(|d| now < d)
+}
+
 /// Invoked by launchd. Show the reminder, or tear it down if --until has passed.
 fn fire_cmd(args: &[String]) {
     let mut label = String::new();
     let mut msg = String::new();
     let mut until: Option<String> = None;
     let mut once = false;
+    let mut due: Option<NaiveDateTime> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1139,8 +1161,18 @@ fn fire_cmd(args: &[String]) {
             "--msg" => msg = it.next().cloned().unwrap_or_default(),
             "--until" => until = it.next().cloned(),
             "--once" => once = true,
+            "--at" => {
+                due = it
+                    .next()
+                    .and_then(|v| NaiveDateTime::parse_from_str(v, ONCE_AT_FMT).ok())
+            }
             _ => {}
         }
+    }
+    if once && is_early_load(due, Local::now().naive_local()) {
+        // RunAtLoad started us at bootstrap or login, before the due time.
+        // The calendar trigger will start us again at the right minute.
+        return;
     }
     if let Some(u) = &until
         && let Some(dt) = parse_until(u)
@@ -1595,6 +1627,19 @@ mod tests {
         assert!(xml.contains("<key>Hour</key><integer>9</integer>"));
         assert!(xml.contains("<key>Minute</key><integer>5</integer>"));
         assert_eq!(Schedule::Once(at).human(), "once at 2026-08-12 09:05");
+    }
+
+    #[test]
+    fn test_once_early_load_waits_and_missed_fire_shows() {
+        let due = NaiveDateTime::parse_from_str("2026-10-11 07:00", ONCE_AT_FMT).unwrap();
+        let before = due - ChronoDuration::minutes(5);
+        let at_minute = due;
+        let after_reboot = due + ChronoDuration::hours(3);
+        assert!(is_early_load(Some(due), before));
+        assert!(!is_early_load(Some(due), at_minute));
+        assert!(!is_early_load(Some(due), after_reboot));
+        // Jobs written before --at existed keep firing as they always did.
+        assert!(!is_early_load(None, before));
     }
 
     #[test]
